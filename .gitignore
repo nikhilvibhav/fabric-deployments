@@ -1,0 +1,11 @@
+.project
+.idea/
+*\jmeter.log
+*\.DS_Store
+__pycache__/
+*.py[cod]
+.venv-deploy/
+# Stage private keys must never be committed; only public.key belongs in Git.
+*.private.key
+secrets/**/*.key
+!secrets/*/public.key

@@ -1,0 +1,119 @@
+#!/bin/sh
+#
+# Camel daemon init script
+#
+#
+
+### BEGIN INIT INFO
+# Provides:
+# Required-Start:
+# Required-Stop:
+# Should-Start:
+# Should-Stop:
+# Default-Start:
+# Default-Stop:
+# Short-Description:
+# Description:
+# chkconfig: - 85 12
+### END INIT INFO
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+CAMEL_USER='camel'
+CAMEL_INSTALL_ROOT='/opt/camel'
+CAMEL_OPTIONS="[[jvm_options]]"
+app="[[application]]"
+CAMEL_EXEC="[[application_execute]]"
+
+CAMEL_LOG="/var/log/camel/${CAMEL_EXEC}_stdout.log"
+CAMEL_ERROR_LOG="/var/log/camel/${CAMEL_EXEC}_stderr.log"
+CAMEL_JAR_PATH="[[release_path]]"
+CAMEL_JAR="[[application_name]].jar"
+JAVA_BIN="[[java_bin]]"
+
+lockfile=/var/lock/subsys/$CAMEL_EXEC
+pidfile=/var/run/${CAMEL_EXEC}.pid
+
+# pidfile must be owned by camel user
+exec="${JAVA_BIN} ${CAMEL_OPTIONS} -jar ${CAMEL_JAR_PATH}/${CAMEL_JAR} > ${CAMEL_LOG} 2> ${CAMEL_ERROR_LOG} & "'echo $!'" > ${pidfile}"
+
+start() {
+    # pidfile must be owned by camel user
+    touch $pidfile
+    chown $CAMEL_USER $pidfile
+    echo -n $"Starting ${CAMEL_EXEC}: "
+    # if not running, start it up here, usually something like "daemon $exec"
+    pushd "${CAMEL_JAR_PATH}" >/dev/null
+    daemon --pidfile=${pidfile} --user=${CAMEL_USER} ${exec}
+    retval=$?
+    popd >/dev/null
+    echo
+    [ $retval -eq 0 ] && touch $lockfile
+    return $retval
+}
+
+stop() {
+    echo -n $"Stopping ${CAMEL_EXEC}: "
+    # stop it here, often "killproc ${CAMEL_EXEC}"
+    killproc -p $pidfile ${CAMEL_EXEC}
+    retval=$?
+    echo
+    [ $retval -eq 0 ] && rm -f $lockfile
+    return $retval
+}
+
+restart() {
+    stop
+    start
+}
+
+reload() {
+    restart
+}
+
+force_reload() {
+    restart
+}
+
+rh_status() {
+    # run checks to determine if the service is running or use generic status
+    status ${CAMEL_EXEC}
+}
+
+rh_status_q() {
+    rh_status >/dev/null 2>&1
+}
+
+
+case "$1" in
+    start)
+        rh_status_q && exit 0
+        $1
+        ;;
+    stop)
+        rh_status_q || exit 0
+        $1
+        ;;
+    restart)
+        $1
+        ;;
+    reload)
+        rh_status_q || exit 7
+        $1
+        ;;
+    force-reload)
+        force_reload
+        ;;
+    status)
+        rh_status
+        ;;
+    condrestart|try-restart)
+        rh_status_q || exit 0
+        restart
+        ;;
+    *)
+        echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload}"
+        exit 2
+esac
+exit $?

@@ -1,0 +1,21 @@
+[program:[[application_execute]]]
+process_name=[[application_execute]]
+
+command=[[java_bin]] [[jvm_options]] -jar [[release_path]]/[[application_name]].jar
+
+umask=022
+autostart=true
+autorestart=unexpected
+user=camel
+environment=LANG=C
+directory=[[release_path]]
+loglevel=info
+
+stdout_logfile=[[camel_log_dir]]/[[application_execute]]/stdout.log
+stdout_logfile_maxbytes=1MB
+stdout_logfile_backups=10
+stderr_logfile=[[camel_log_dir]]/[[application_execute]]/stderr.log
+stderr_logfile_maxbytes=1MB
+sterr_logfile_backups=10
+redirect_stderr=false
+exitcodes=0

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?> 
+<configuration scan="true" scanPeriod="5 seconds">
+<springProperty scope="context" name="LOG_PATH" source="logging.path"/>
+
+    <!-- GELF Appender -->
+    <appender name="GELF" class="de.siegmar.logbackgelf.GelfUdpAppender">
+            <graylogHost>[[gelf_host]]</graylogHost>
+        	<graylogPort>12201</graylogPort>
+            <useCompression>false</useCompression>
+            <encoder class="de.siegmar.logbackgelf.GelfEncoder">
+                    <includeRawMessage>false</includeRawMessage>
+                    <includeMarker>true</includeMarker>
+                    <includeMdcData>true</includeMdcData>
+                    <includeCallerData>false</includeCallerData>
+                    <includeRootCauseData>false</includeRootCauseData>
+                    <includeLevelName>false</includeLevelName>
+                    <shortPatternLayout class="ch.qos.logback.classic.PatternLayout">
+                    <pattern>%m%nopex</pattern>
+                    </shortPatternLayout>
+                    <fullPatternLayout class="ch.qos.logback.classic.PatternLayout">
+                    <pattern>%m%n</pattern>
+                    </fullPatternLayout>
+                    <staticField>app_name:[[application_execute]]</staticField>
+            </encoder>
+    </appender>
+
+    <!-- Daily Rolling File Appender - Retain last 90 days archived logs -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/[[application_execute]].log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/[[application_execute]].%d{yyyy-MM-dd}.log.gz</fileNamePattern>
+            <maxHistory>90</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%-45(%d{dd-MMM-yyyy HH:mm:ss.SSS} [%thread]) %-5level %logger{40} - %X{camel.correlationId} - %msg%n%ex{5}</pattern>
+            <outputPatternAsHeader>true</outputPatternAsHeader>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="FILE" />
+        <appender-ref ref="GELF" />
+    </root> 
+  
+    <!-- For Camel HTTP Debugging , Switch these to DEBUG to see what HTTP calls are made -->
+    <logger name="org.apache.http.impl.client" level="INFO"/>
+    <logger name="org.apache.http.wire" level="INFO" />
+    <logger name="org.apache.http.headers" level="INFO"/>
+
+    <!-- Turn ActiveMQ Failover to WARN, reduces excessive AMQ logging -->
+    <logger name="org.apache.activemq.transport.failover.FailoverTransport" level="WARN"/>
+
+</configuration>
