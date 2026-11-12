@@ -16,6 +16,6 @@ stdout_logfile_maxbytes=1MB
 stdout_logfile_backups=10
 stderr_logfile=[[camel_log_dir]]/[[application_execute]]/stderr.log
 stderr_logfile_maxbytes=1MB
-sterr_logfile_backups=10
+stderr_logfile_backups=10
 redirect_stderr=false
 exitcodes=0
