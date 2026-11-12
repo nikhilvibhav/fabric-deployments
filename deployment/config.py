@@ -226,6 +226,28 @@ def config_files(stage, application, values, root=ROOT):
     return files
 
 
+class _Recorder(dict):
+    """Renders every placeholder as empty while recording its name."""
+
+    def __init__(self):
+        super().__init__()
+        self.names = set()
+
+    def __contains__(self, key):
+        return True
+
+    def __getitem__(self, key):
+        self.names.add(key)
+        return ""
+
+
+def template_names(stage, application, root=ROOT):
+    """Placeholder names and blank-rendered files, selected exactly as deploy does."""
+    recorder = _Recorder()
+    files = config_files(stage, application, recorder, root)
+    return recorder.names, files
+
+
 def shared_files(stage, application, root=ROOT):
     source = root / "files" / stage / application
     return {path.stem: path.read_bytes() for path in sorted(source.glob("*.shared"))}

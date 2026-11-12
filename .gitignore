@@ -6,7 +6,10 @@
 __pycache__/
 *.py[cod]
 .venv-deploy/
+.python-version
+.venv/
 .env
+.ruff_cache/
 # Stage private keys must never be committed; only public.key belongs in Git.
 *.private.key
 secrets/**/*.key

@@ -1,0 +1,10 @@
+repos:
+    - repo: local
+      hooks:
+          - id: secrets-check
+            name: Check encrypted secrets (no key required)
+            entry: python -m deployment secrets check
+            language: python
+            additional_dependencies: ["pynacl==1.6.2"]
+            pass_filenames: false
+            files: ^(secrets|files|deployment)/

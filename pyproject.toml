@@ -1,0 +1,23 @@
+[project]
+name = "capistrano-migration"
+version = "0.1.0"
+description = "In progress deployment using fabric/invoke and python; replaces the current capistrano deployment"
+readme = "README.md"
+authors = [
+    { name = "Nikhil Vibhav", email = "nikhil92ind@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fabric>=3.2.3",
+    "invoke>=2.2.1",
+    "pynacl>=1.6.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.4",
+]
+
+[tool.uv]
+# An application run with `python -m deployment`, not an installable package.
+package = false

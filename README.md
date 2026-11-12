@@ -38,16 +38,17 @@ account. Have an administrator create that directory and grant the Jenkins
 account ownership if needed; install Python packages as that account, not with
 `sudo pip`.
 
-After the repository has been cloned to `/tmp/workspace`, initialize the venv:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/): `pyproject.toml`
+declares them and `uv.lock` pins exact versions. Install uv on the agent as the
+Jenkins account, then, after the repository has been cloned to `/tmp/workspace`,
+create the venv from the lockfile:
 
 ```sh
-python3 -m venv /opt/venvs/camel-deploy
-. /opt/venvs/camel-deploy/bin/activate
-python -m pip install -r /tmp/workspace/deployment/requirements.txt
+cd /tmp/workspace
+UV_PROJECT_ENVIRONMENT=/opt/venvs/camel-deploy uv sync --locked --no-dev
 ```
 
-Do this once per persistent agent, and repeat the dependency installation when
-`deployment/requirements.txt` changes. If the agent is ephemeral, bake the
+Do this once per persistent agent, and rerun it when `uv.lock` changes. If the agent is ephemeral, bake the
 environment into its image or create it during agent provisioning. A global
 install is possible on a dedicated, managed agent, but an isolated venv avoids
 conflicts with other jobs and OS-managed Python packages.
@@ -203,10 +204,45 @@ python -m deployment secrets list  --stage qa --application authentication-servi
 python -m deployment secrets unset --stage qa --application authentication-service \
   --name jdbc_database_password
 
+# Check names and file structure against templates (anyone; no key needed).
+python -m deployment secrets check
+
 # Check every value decrypts (key holder), then deploy.
 export CAMEL_SECRETS_KEY_FILE=/secure/qa.private.key
 python -m deployment secrets verify --stage qa --application authentication-service
 python -m deployment deploy --stage qa --roles cml1 --application authentication-service
+```
+
+### Checking secrets before you push
+
+Developers hold only the public key and cannot decrypt, so they validate
+secrets with `secrets check`. It needs no key and reports:
+
+- **Errors** (fail the check): malformed or truncated ciphertext, a secret
+  name with no matching `[[name]]` placeholder (e.g. a typo), secrets for an
+  application with no configuration directory, or a stage without `public.key`.
+- **Warnings**: a placeholder that has no encrypted value and must come from
+  the environment or `--vars-file`, or a sensitive-looking property (password,
+  secret, token, API key) that still has a plaintext value in an application
+  that uses encrypted secrets.
+
+Narrow it with `--stage` and `--application`. CI runs it on every push and PR.
+To run it automatically before each commit, install the hook once:
+
+```sh
+uv tool install pre-commit
+pre-commit install
+```
+
+Key holders use `secrets verify`, which decrypts every value but prints only
+names. To confirm a stored value is the one you expect without displaying it,
+use `--compare`. It prompts for the expected value and reports only whether it
+matches. It requires an interactive terminal, so it cannot be scripted into CI
+logs.
+
+```sh
+python -m deployment secrets verify --stage qa --application authentication-service \
+  --name jdbc_database_password --compare
 ```
 
 `plan` works without the key: it lists secret names and validates templates

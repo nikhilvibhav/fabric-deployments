@@ -135,6 +135,126 @@ class SecretStoreTests(unittest.TestCase):
         )
 
 
+class CheckAndVerifyTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.key = self.root / "qa.private.key"
+        secrets.keygen("qa", self.key, self.root)
+        for name in ("application.properties", "logback.xml", "logback-access.xml"):
+            self.write(Path("files") / name, "fallback\n")
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    store = SecretStoreTests.store
+
+    def write(self, relative, text):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def config(self, text, application="app"):
+        self.write(Path("files") / "qa" / application / "env.properties", text)
+
+    def verify(self, *extra):
+        argv = ["verify", "--stage", "qa", "--application", "app"]
+        argv += ["--secrets-key", str(self.key), *extra]
+        with redirect_stdout(io.StringIO()) as output:
+            secrets.run(argv, self.root)
+        return output.getvalue()
+
+    def test_referenced_well_formed_secret_passes(self):
+        self.config("db.password=[[db_password]]\n")
+        self.store("app", "db_password", "value")
+        self.assertEqual(secrets.check(root=self.root), ([], []))
+
+    def test_unused_or_misnamed_secret_is_an_error(self):
+        self.config("db.password=[[db_password]]\n")
+        self.store("app", "db_pasword", "value")
+        errors, _ = secrets.check(root=self.root)
+        self.assertTrue(any("db_pasword is not used" in e for e in errors), errors)
+
+    def test_secret_for_unknown_application_is_an_error(self):
+        self.store("missing-app", "db_password", "value")
+        errors, _ = secrets.check(root=self.root)
+        self.assertTrue(any("Configuration directory is missing" in e for e in errors))
+
+    def test_malformed_or_truncated_ciphertext_is_an_error(self):
+        self.config("a=[[first]]\nb=[[second]]\n")
+        secrets.write_store(
+            "qa", "app", {"first": "not base64!", "second": "AAAA"}, self.root
+        )
+        errors, _ = secrets.check(root=self.root)
+        self.assertTrue(any("Invalid base64 in first" in e for e in errors), errors)
+        self.assertTrue(any("second is not a sealed value" in e for e in errors))
+
+    def test_store_without_public_key_is_an_error(self):
+        self.write(Path("secrets") / "qe" / "app.json", '{"version": 1, "values": {}}')
+        errors, _ = secrets.check("qe", root=self.root)
+        self.assertTrue(any("No public key for stage qe" in e for e in errors))
+
+    def test_plaintext_and_environment_placeholders_are_warnings(self):
+        self.config(
+            "db.password=[[db_password]]\n"
+            "admin.password=hunter2\n"
+            "auth.base-url-token=https://auth/token\n"
+            "spring.password=${SPRING_PASSWORD}\n"
+            "jdbc.password=[[jdbc_database_password]]\n"
+        )
+        self.store("app", "db_password", "value")
+        errors, warnings = secrets.check(root=self.root)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertIn("plaintext value for admin.password", warnings[1])
+        self.assertIn("[[jdbc_database_password]] is not an encrypted", warnings[0])
+
+    def test_cli_check_fails_on_errors(self):
+        self.store("missing-app", "db_password", "value")
+        with (
+            redirect_stdout(io.StringIO()) as output,
+            self.assertRaisesRegex(ValueError, "found 1 error"),
+        ):
+            secrets.run(["check"], self.root)
+        self.assertIn("ERROR qa/missing-app", output.getvalue())
+
+    def test_repository_secrets_have_no_errors(self):
+        errors, _ = secrets.check()
+        self.assertEqual(errors, [])
+
+    def test_verify_prints_names_never_values(self):
+        self.store("app", "db_password", "top-secret")
+        output = self.verify()
+        self.assertIn("db_password: decrypted", output)
+        self.assertNotIn("top-secret", output)
+
+    def test_verify_compare_reports_match_without_printing_value(self):
+        self.store("app", "db_password", "top-secret")
+        with (
+            patch("sys.stdin", MagicMock(isatty=lambda: True)),
+            patch("getpass.getpass", return_value="top-secret"),
+        ):
+            output = self.verify("--name", "db_password", "--compare")
+        self.assertIn("matches the expected value", output)
+        self.assertNotIn("top-secret", output)
+        with (
+            patch("sys.stdin", MagicMock(isatty=lambda: True)),
+            patch("getpass.getpass", return_value="wrong"),
+            self.assertRaisesRegex(ValueError, "does not match"),
+        ):
+            self.verify("--name", "db_password", "--compare")
+
+    def test_verify_compare_requires_terminal_and_name(self):
+        self.store("app", "db_password", "top-secret")
+        with self.assertRaisesRegex(ValueError, "requires --name"):
+            self.verify("--compare")
+        with (
+            patch("sys.stdin", MagicMock(isatty=lambda: False)),
+            self.assertRaisesRegex(ValueError, "interactive terminal"),
+        ):
+            self.verify("--name", "db_password", "--compare")
+
+
 class DeploymentIntegrationTests(unittest.TestCase):
     def test_environment_variable_conflicting_with_secret_fails(self):
         with self.assertRaisesRegex(ValueError, "both as an encrypted secret"):

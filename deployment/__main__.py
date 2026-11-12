@@ -264,7 +264,7 @@ def main(argv=None):
     if argv[:1] and argv[0] in commands:
         try:
             commands[argv[0]](argv[1:])
-        except (ValueError, OSError) as exc:
+        except (TypeError, ValueError, OSError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
         return 0

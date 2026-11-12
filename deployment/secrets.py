@@ -8,23 +8,28 @@ Only the holder of the environment's private key can decrypt them.
 import argparse
 import base64
 import getpass
+import hmac
 import json
 import os
-import pprint
 import re
 import stat
 import sys
 import tempfile
 from pathlib import Path
 
+from nacl.bindings import crypto_box_SEALBYTES
 from nacl.exceptions import CryptoError
 from nacl.public import PrivateKey, PublicKey, SealedBox
 
-from .config import ROOT, SEGMENT, relative_path
+from .config import DEFAULTS, ROOT, SEGMENT, relative_path, template_names
 
 FORMAT_VERSION = 1
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 KEY_ENV = "CAMEL_SECRETS_KEY_FILE"
+# Property keys whose literal values should be encrypted secrets instead.
+SENSITIVE_PROPERTY = re.compile(
+    r"(password|passwd|pwd|secret|token|api[-_.]?key)$", re.IGNORECASE
+)
 # Values rendered into service definitions/process arguments, or that select paths.
 RESERVED = {
     "stage",
@@ -119,8 +124,10 @@ def read_store(stage, application, root=ROOT):
     if not path.is_file():
         return {}
     data = json.loads(path.read_text())
-    if data.get("version") != FORMAT_VERSION or not isinstance(
-        data.get("values"), dict
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != FORMAT_VERSION
+        or not isinstance(data.get("values"), dict)
     ):
         raise ValueError(f"Unsupported secrets file format: {path.name}")
     return data["values"]
@@ -150,12 +157,17 @@ def validate_name(name):
         )
 
 
-def seal(public_key, stage, application, name, value):
+def bound_payload(stage, application, name, value):
     # Binding identity into the plaintext stops ciphertext being moved between apps or names.
-    payload = json.dumps(
+    return json.dumps(
         {"stage": stage, "application": application, "name": name, "value": value}
+    ).encode()
+
+
+def seal(public_key, stage, application, name, value):
+    return encode(
+        SealedBox(public_key).encrypt(bound_payload(stage, application, name, value))
     )
-    return encode(SealedBox(public_key).encrypt(payload.encode()))
 
 
 def unseal(private_key, stage, application, name, ciphertext):
@@ -231,6 +243,102 @@ def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
     return len(stores)
 
 
+def plaintext_properties(content):
+    """Keys of sensitive-looking properties that still hold a literal value."""
+    for line in content.decode("utf-8", "replace").splitlines():
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if (
+            separator
+            and value
+            and not key.startswith(("#", "!"))
+            and SENSITIVE_PROPERTY.search(key)
+            # Runtime references and URLs (e.g. token endpoints) are not secrets.
+            and not value.startswith(("${", "{{", "http://", "https://"))
+        ):
+            yield key
+
+
+def check_store(stage, application, root, errors, warnings):
+    label = f"{stage}/{application}"
+    try:
+        sealed = read_store(stage, application, root)
+        used, files = template_names(stage, application, root)
+    except (ValueError, OSError) as exc:
+        errors.append(f"{label}: {exc}")
+        return
+    if not sealed:
+        errors.append(f"{label}: no encrypted secrets")
+    for name, ciphertext in sorted(sealed.items()):
+        try:
+            validate_name(name)
+            # Ciphertext shorter than this cannot hold an empty value bound to this identity.
+            minimum = crypto_box_SEALBYTES + len(
+                bound_payload(stage, application, name, "")
+            )
+            if not isinstance(ciphertext, str) or len(decode(ciphertext, name)) < (
+                minimum
+            ):
+                raise ValueError(
+                    f"Secret {name} is not a sealed value for this stage, application and name"
+                )
+        except ValueError as exc:
+            errors.append(f"{label}: {exc}")
+        if name not in used:
+            errors.append(f"{label}: secret {name} is not used by any [[{name}]]")
+    provided = set(sealed) | set(DEFAULTS) | RESERVED | {"gelf_host"}
+    for name in sorted(used - provided):
+        warnings.append(
+            f"{label}: [[{name}]] is not an encrypted secret; "
+            "it must come from the environment or --vars-file"
+        )
+    for filename, content in files.items():
+        if filename.endswith(".properties"):
+            warnings.extend(
+                f"{label}: {filename} has a plaintext value for {key}"
+                for key in plaintext_properties(content)
+            )
+
+
+def check(stage=None, application=None, root=ROOT):
+    """Validate secrets stores without a private key; returns (errors, warnings)."""
+    errors, warnings = [], []
+    if stage:
+        stages = [stage]
+    elif (root / "secrets").is_dir():
+        stages = sorted(
+            path.name for path in (root / "secrets").iterdir() if path.is_dir()
+        )
+    else:
+        stages = []
+    for stage_name in stages:
+        directory = secrets_dir(stage_name, root)
+        applications = (
+            [application]
+            if application
+            else [
+                path.relative_to(directory).with_suffix("").as_posix()
+                for path in sorted(directory.rglob("*.json"))
+            ]
+        )
+        if applications:
+            try:
+                load_public_key(stage_name, root)
+            except ValueError as exc:
+                errors.append(f"{stage_name}: {exc}")
+        for name in applications:
+            check_store(stage_name, name, root, errors, warnings)
+    return errors, warnings
+
+
+def compare_value(name, actual):
+    if not sys.stdin.isatty():
+        raise ValueError("--compare needs an interactive terminal")
+    expected = getpass.getpass(f"Expected value for {name}: ")
+    if not hmac.compare_digest(expected.encode(), actual.encode()):
+        raise ValueError(f"{name} does not match the expected value")
+
+
 def read_value(source):
     if source == "-":
         value = sys.stdin.read()
@@ -258,6 +366,11 @@ def parser():
     rekey_parser.add_argument("--stage", required=True)
     rekey_parser.add_argument("--old-key", required=True)
     rekey_parser.add_argument("--private-key-out", required=True)
+    check_parser = commands.add_parser(
+        "check", help="Validate secrets against templates without a key"
+    )
+    check_parser.add_argument("--stage", help="Default: every stage")
+    check_parser.add_argument("--application", help="Default: every application")
     for name, help_text in (
         ("set", "Encrypt and store a value"),
         ("unset", "Remove a value"),
@@ -278,6 +391,12 @@ def parser():
         if name == "verify":
             command.add_argument(
                 "--secrets-key", default=os.environ.get(KEY_ENV), required=False
+            )
+            command.add_argument("--name", help="Verify only this secret")
+            command.add_argument(
+                "--compare",
+                action="store_true",
+                help="Prompt for the expected value of --name and report match or mismatch",
             )
     return result
 
@@ -316,11 +435,33 @@ def run(argv, root=ROOT):
     elif args.command == "list":
         for name in sorted(read_store(args.stage, args.application, root)):
             print(name)
+    elif args.command == "check":
+        if args.application and not args.stage:
+            raise ValueError("--application requires --stage")
+        errors, warnings = check(args.stage, args.application, root)
+        for message in warnings:
+            print(f"WARNING {message}")
+        for message in errors:
+            print(f"ERROR {message}")
+        if errors:
+            raise ValueError(f"Secrets check found {len(errors)} error(s)")
+        print(f"Secrets check passed with {len(warnings)} warning(s)")
     elif args.command == "verify":
         if not args.secrets_key:
             raise ValueError(f"Supply --secrets-key or {KEY_ENV}")
+        if args.compare and not args.name:
+            raise ValueError("--compare requires --name")
+        # Decrypting every value also proves the whole file is consistent.
         values = decrypt_all(args.stage, args.application, args.secrets_key, root)
+        if args.name and args.name not in values:
+            raise ValueError(f"{args.name} is not set")
+        # Never print values: this output can end up in terminals and CI logs.
+        if args.compare:
+            compare_value(args.name, values[args.name])
+            print(f"{args.name}: matches the expected value")
+            return
+        for name in [args.name] if args.name else sorted(values):
+            print(f"{name}: decrypted")
         print(
             f"{len(values)} secret(s) decrypted successfully for {args.stage}/{args.application}"
         )
-        pprint.pprint(values, indent=2, expand=True, sort_dicts=False)
