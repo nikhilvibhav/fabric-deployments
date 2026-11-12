@@ -480,6 +480,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
+            patch.object(cli, "decrypt_all", return_value={"truststore_password": "test-value"}),
         ):
 
             def bundle(args, values, workspace):
@@ -501,6 +502,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
+            patch.object(cli, "decrypt_all", return_value={"truststore_password": "test-value"}),
             self.assertRaisesRegex(RuntimeError, "locked"),
         ):
             cli.execute(self.args())
@@ -514,6 +516,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
+            patch.object(cli, "decrypt_all", return_value={"truststore_password": "test-value"}),
         ):
 
             def bundle(args, values, workspace):
