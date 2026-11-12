@@ -181,7 +181,7 @@ def config_files(stage, application, values, root=ROOT):
             continue
         if path.suffix == ".erb":
             raise ValueError(f"{path.name} has an unsupported template suffix")
-        if path.suffix not in {".properties", ".xml"}:
+        if path.suffix not in {".properties", ".xml", ".yaml", ".yml"}:
             continue
         name = path.name
         if name in files:

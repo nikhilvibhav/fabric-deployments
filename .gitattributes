@@ -1,0 +1,7 @@
+* text=auto
+*.py text eol=LF
+*.properties text eol=LF
+*.xml text eol=LF
+*.json text eol=LF
+*.sh text eol=LF
+

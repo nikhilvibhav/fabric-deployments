@@ -10,6 +10,7 @@ import base64
 import getpass
 import json
 import os
+import pprint
 import re
 import stat
 import sys
@@ -265,3 +266,4 @@ def run(argv, root=ROOT):
             raise ValueError(f"Supply --secrets-key or {KEY_ENV}")
         values = decrypt_all(args.stage, args.application, args.secrets_key, root)
         print(f"{len(values)} secret(s) decrypted successfully for {args.stage}/{args.application}")
+        pprint.pprint(values, indent=2, expand=True, sort_dicts=False)

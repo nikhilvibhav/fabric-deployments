@@ -61,7 +61,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_actual_qa_configuration_and_shared_fallback(self):
         settings, _ = environment("qa")
-        values = variables("qa", "authentication-service", "1", False, settings, environ={})
+        values = variables("qa", "authentication-service", "1", False, settings, environ={}, secret_values={"truststore_password": "not-a-p@ssw0rd"})
         files = config_files("qa", "authentication-service", values)
         self.assertIn(b"server.port=8080", files["application.properties"])
         self.assertIn(b"<graylogHost>graylog.service</graylogHost>", files["logback.xml"])
