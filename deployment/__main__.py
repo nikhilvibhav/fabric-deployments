@@ -5,17 +5,21 @@ import os
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import secrets as secrets_cli
 from .artifacts import Repository, valid_url
 from .config import (
-    boolean, config_files, environment, select_hosts, shared_files, variables,
+    boolean,
+    config_files,
+    environment,
+    select_hosts,
+    shared_files,
+    variables,
 )
 from .secrets import KEY_ENV, decrypt_all, read_store
-from . import secrets as secrets_cli
-
 
 LOG = logging.getLogger("camel-deploy")
 DEFAULT_REPOSITORY = "http://10.90.135.56:8081/artifactory/simple"
@@ -33,22 +37,35 @@ def release_type_for_version(version, requested=None):
 
 def parser():
     result = argparse.ArgumentParser(description="Fabric deployment CLI")
-    result.add_argument("action", choices=("plan", "deploy", "rollback", "start", "stop"))
+    result.add_argument(
+        "action", choices=("plan", "deploy", "rollback", "start", "stop")
+    )
     result.add_argument("--stage", required=True)
-    result.add_argument("--roles", required=True, help="Comma-separated inventory roles")
+    result.add_argument(
+        "--roles", required=True, help="Comma-separated inventory roles"
+    )
     result.add_argument("--application", default=os.environ.get("application"))
     result.add_argument("--version", default=os.environ.get("version", "latest"))
-    result.add_argument("--second-artifact", default=os.environ.get("deploy_second_artifact", "false"),
-                        type=boolean)
-    result.add_argument("--release-type", choices=("snapshot", "stable"),
-                        help="Optional consistency check; inferred from the version suffix")
+    result.add_argument(
+        "--second-artifact",
+        default=os.environ.get("deploy_second_artifact", "false"),
+        type=boolean,
+    )
+    result.add_argument(
+        "--release-type",
+        choices=("snapshot", "stable"),
+        help="Optional consistency check; inferred from the version suffix",
+    )
     result.add_argument("--vars-file")
     result.add_argument("--artifact-url", default=os.environ.get("artifact_url"))
     result.add_argument("--sha256", default=os.environ.get("artifact_sha256"))
     result.add_argument("--repository", default=os.environ.get("artifactory_base_url"))
     result.add_argument("--health-url", default=os.environ.get("health_url"))
-    result.add_argument("--secrets-key", default=os.environ.get(KEY_ENV),
-                        help=f"Stage private key file (default: ${KEY_ENV})")
+    result.add_argument(
+        "--secrets-key",
+        default=os.environ.get(KEY_ENV),
+        help=f"Stage private key file (default: ${KEY_ENV})",
+    )
     return result
 
 
@@ -58,11 +75,18 @@ def prepare_bundle(args, values, workspace):
     repository = Repository()
     release_type = release_type_for_version(args.version, args.release_type)
     base = args.repository or (
-        DEFAULT_REPOSITORY + ("/libs-snapshot-local/com/rmg" if release_type == "snapshot"
-                              else "/libs-release-local/com/rmg")
+        DEFAULT_REPOSITORY
+        + (
+            "/libs-snapshot-local/com/rmg"
+            if release_type == "snapshot"
+            else "/libs-release-local/com/rmg"
+        )
     )
     artifact_url = args.artifact_url or repository.resolve(
-        base, os.environ.get("path_to_jar") or values["application"], args.version, ".jar",
+        base,
+        os.environ.get("path_to_jar") or values["application"],
+        args.version,
+        ".jar",
     )
     if not urlsplit(artifact_url).path.lower().endswith(".jar"):
         raise ValueError("The artifact URL must point to a JAR file")
@@ -82,31 +106,56 @@ def execute(args):
     secret_names = sorted(read_store(args.stage, args.application))
     # Plan without a key stays offline-safe; deploy always requires decryption.
     decrypt = args.action == "deploy" or (args.action == "plan" and args.secrets_key)
-    secret_values = decrypt_all(args.stage, args.application, args.secrets_key) if decrypt else {}
+    secret_values = (
+        decrypt_all(args.stage, args.application, args.secrets_key) if decrypt else {}
+    )
     values = variables(
-        args.stage, args.application, args.version, args.second_artifact,
-        settings, args.vars_file, secret_values=secret_values,
+        args.stage,
+        args.application,
+        args.version,
+        args.second_artifact,
+        settings,
+        args.vars_file,
+        secret_values=secret_values,
     )
     if secret_names and args.action == "plan" and not decrypt:
         # Placeholders let templates be checked without the key; never deployed.
-        values.update({name: "<encrypted>" for name in secret_names if name not in values})
+        values.update(
+            {name: "<encrypted>" for name in secret_names if name not in values}
+        )
     if args.health_url:
         valid_url(args.health_url)
     if args.action in {"plan", "deploy"}:
         # Validate every selected template before making any remote change.
-        config_values = dict(values, release_path=values["deploy_to"] + "/releases/validation")
+        config_values = dict(
+            values, release_path=values["deploy_to"] + "/releases/validation"
+        )
         config_files(args.stage, args.application, config_values)
     if args.action == "plan":
-        print(json.dumps({
-            "stage": args.stage, "application": args.application, "hosts": selected,
-            "version": args.version, "release_type": args.release_type,
-            "deploy_to": values["deploy_to"],
-            "service_manager": "supervisor" if settings["use_supervisor"] else "sysv",
-            "health_check": "HTTP + process" if args.health_url else "process only",
-            "secrets": {"names": secret_names,
-                        "decrypted": bool(decrypt and secret_names)},
-            "templates": "[[name]] only",
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "stage": args.stage,
+                    "application": args.application,
+                    "hosts": selected,
+                    "version": args.version,
+                    "release_type": args.release_type,
+                    "deploy_to": values["deploy_to"],
+                    "service_manager": "supervisor"
+                    if settings["use_supervisor"]
+                    else "sysv",
+                    "health_check": "HTTP + process"
+                    if args.health_url
+                    else "process only",
+                    "secrets": {
+                        "names": secret_names,
+                        "decrypted": bool(decrypt and secret_names),
+                    },
+                    "templates": "[[name]] only",
+                },
+                indent=2,
+            )
+        )
         return
     from .remote import Remote
 
@@ -134,7 +183,9 @@ def execute(args):
                     states.append((remote, current, state))
             for remote in remotes:
                 if args.action == "rollback":
-                    _, current, state = next(item for item in states if item[0] is remote)
+                    _, current, state = next(
+                        item for item in states if item[0] is remote
+                    )
                     remote.restore(current, state)
                 else:
                     remote.lifecycle(args.action)
@@ -142,7 +193,9 @@ def execute(args):
                         remote.healthy()
                 LOG.info("%s succeeded on %s", args.action, remote.connection.host)
             return
-        release_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        release_id = (
+            datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        )
         release = values["deploy_to"] + "/releases/" + release_id
         with tempfile.TemporaryDirectory(prefix="camel-deploy-") as temporary:
             workspace = Path(temporary)
@@ -156,7 +209,10 @@ def execute(args):
                 ).items():
                     (config / name).write_bytes(content)
                 state = remote.prepare(
-                    bundle, release, metadata, shared_files(args.stage, args.application)
+                    bundle,
+                    release,
+                    metadata,
+                    shared_files(args.stage, args.application),
                 )
                 activated.append((remote, release, state))
                 LOG.info("Publishing %s on %s", release_id, remote.connection.host)
@@ -175,9 +231,14 @@ def execute(args):
                 remote.restore(release, state)
                 LOG.error("Restored previous deployment on %s", remote.connection.host)
             except Exception:
-                LOG.error("ROLLBACK FAILED on %s; manual recovery required", remote.connection.host)
+                LOG.error(
+                    "ROLLBACK FAILED on %s; manual recovery required",
+                    remote.connection.host,
+                )
         if published:
-            LOG.error("Release was published and remains active; post-deployment cleanup failed")
+            LOG.error(
+                "Release was published and remains active; post-deployment cleanup failed"
+            )
         raise
     finally:
         close_errors = []
@@ -185,11 +246,16 @@ def execute(args):
             try:
                 remote.close()
             except Exception as exc:
-                LOG.error("Could not release lock/close connection on %s: %s",
-                          remote.connection.host, type(exc).__name__)
+                LOG.error(
+                    "Could not release lock/close connection on %s: %s",
+                    remote.connection.host,
+                    type(exc).__name__,
+                )
                 close_errors.append(exc)
         if close_errors and failure is None:
-            raise RuntimeError("Deployment locks could not be released; manual inspection required")
+            raise RuntimeError(
+                "Deployment locks could not be released; manual inspection required"
+            )
 
 
 def main(argv=None):
@@ -204,15 +270,21 @@ def main(argv=None):
         return 0
     args = parser().parse_args(argv)
     if not args.application:
-        parser().error("--application or the application environment variable is required")
+        parser().error(
+            "--application or the application environment variable is required"
+        )
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         execute(args)
     except Exception as exc:
         # Command failures may contain application output. Do not echo secrets in CI logs.
-        LOG.error("Deployment failed (%s). %s", type(exc).__name__,
-                  str(exc) if isinstance(exc, (ValueError, OSError, RuntimeError)) else
-                  "Inspect the target service, deployment state and messages above.")
+        LOG.error(
+            "Deployment failed (%s). %s",
+            type(exc).__name__,
+            str(exc)
+            if isinstance(exc, (ValueError, OSError, RuntimeError))
+            else "Inspect the target service, deployment state and messages above.",
+        )
         return 1
     return 0
 

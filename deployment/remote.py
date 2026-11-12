@@ -29,7 +29,8 @@ class Remote:
         self.base = values["deploy_to"]
         self.service = values["application_execute"]
         self.service_file = (
-            f"/etc/supervisord.d/{self.service}.conf" if supervisor
+            f"/etc/supervisord.d/{self.service}.conf"
+            if supervisor
             else f"/etc/init.d/{self.service}"
         )
         self.locked = False
@@ -56,7 +57,9 @@ class Remote:
         self.run(f"mkdir {q(self.base + '/.deploy-lock')}")
         self.locked = True
         if self.supervisor and self.exists(f"/etc/init.d/{self.service}"):
-            raise ValueError("Both service managers may be configured; migrate the SysV service explicitly first")
+            raise ValueError(
+                "Both service managers may be configured; migrate the SysV service explicitly first"
+            )
 
     def close(self):
         try:
@@ -80,8 +83,12 @@ class Remote:
 
     def validate_release(self, path):
         parent = str(PurePosixPath(path).parent)
-        if parent != self.base + "/releases" or not re.fullmatch(r"[A-Za-z0-9_.-]+", PurePosixPath(path).name):
-            raise ValueError("Release path is outside this application's releases directory")
+        if parent != self.base + "/releases" or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+", PurePosixPath(path).name
+        ):
+            raise ValueError(
+                "Release path is outside this application's releases directory"
+            )
 
     def prepare(self, bundle, release, metadata, shared):
         self.validate_release(release)
@@ -93,33 +100,46 @@ class Remote:
                 self.run(f"mkdir -p {q(remote)}")
             else:
                 self.connection.put(str(path), remote=remote)
-                self.run(f"chmod {'750' if path.stat().st_mode & 0o111 else '640'} {q(remote)}")
+                self.run(
+                    f"chmod {'750' if path.stat().st_mode & 0o111 else '640'} {q(remote)}"
+                )
         previous = self.current()
         service_existed = self.exists(self.service_file)
         if service_existed:
-            self.run(f"sudo -n cp -p {q(self.service_file)} {q(release + '/.deployment/service.previous')}")
+            self.run(
+                f"sudo -n cp -p {q(self.service_file)} {q(release + '/.deployment/service.previous')}"
+            )
         shared_existed = {}
         for name, content in shared.items():
             if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
                 raise ValueError("Invalid shared filename")
             shared_existed[name] = self.exists(self.base + "/shared/" + name)
             if shared_existed[name]:
-                self.run(f"cp -p {q(self.base + '/shared/' + name)} "
-                         f"{q(release + '/.deployment/shared.previous.' + name)}")
+                self.run(
+                    f"cp -p {q(self.base + '/shared/' + name)} "
+                    f"{q(release + '/.deployment/shared.previous.' + name)}"
+                )
             self.put(content, release + "/.deployment/shared.next." + name)
             self.run(f"chmod 600 {q(release + '/.deployment/shared.next.' + name)}")
         state = dict(
-            previous=previous, service_existed=service_existed,
-            service_file=self.service_file, supervisor=self.supervisor,
-            shared_existed=shared_existed, **metadata,
+            previous=previous,
+            service_existed=service_existed,
+            service_file=self.service_file,
+            supervisor=self.supervisor,
+            shared_existed=shared_existed,
+            **metadata,
         )
         self.put(json.dumps(state).encode(), release + "/.deployment/state.json")
         self.run(f"chmod 600 {q(release + '/.deployment/state.json')}")
         self.run(f"sudo -n chgrp -R camel {q(release)} && chmod 750 {q(release)}")
         service_values = dict(self.values, release_path=release)
-        template = ROOT / "files" / ("camel_supervisord" if self.supervisor else "camel_init")
+        template = (
+            ROOT / "files" / ("camel_supervisord" if self.supervisor else "camel_init")
+        )
         # Shell/INI service definitions run on Linux; never ship Windows line endings.
-        text = render_file(template, service_values).decode("utf-8").replace("\r\n", "\n")
+        text = (
+            render_file(template, service_values).decode("utf-8").replace("\r\n", "\n")
+        )
         self.put(text.encode(), release + "/.deployment/service.next")
         self.run(f"chmod 600 {q(release + '/.deployment/service.next')}")
         self.run(
@@ -131,13 +151,17 @@ class Remote:
     def switch(self, release):
         self.validate_release(release)
         temporary = self.base + "/.current-" + uuid.uuid4().hex
-        self.run(f"ln -s {q(release)} {q(temporary)} && mv -Tf {q(temporary)} {q(self.base + '/current')}")
+        self.run(
+            f"ln -s {q(release)} {q(temporary)} && mv -Tf {q(temporary)} {q(self.base + '/current')}"
+        )
 
     def activate(self, release):
         state = self.load_state(release)
         for name in state["shared_existed"]:
-            self.run(f"install -m 640 {q(release + '/.deployment/shared.next.' + name)} "
-                     f"{q(self.base + '/shared/' + name)}")
+            self.run(
+                f"install -m 640 {q(release + '/.deployment/shared.next.' + name)} "
+                f"{q(self.base + '/shared/' + name)}"
+            )
             self.run(f"sudo -n chgrp camel {q(self.base + '/shared/' + name)}")
         mode = "644" if self.supervisor else "755"
         self.run(
@@ -156,7 +180,9 @@ class Remote:
 
     def lifecycle(self, action):
         if self.supervisor:
-            status = self.run(f"sudo -n supervisorctl status {q(self.service)}", warn=True)
+            status = self.run(
+                f"sudo -n supervisorctl status {q(self.service)}", warn=True
+            )
             running = bool(re.search(r"\bRUNNING\b", status.stdout))
             if action == "start" and running:
                 return
@@ -171,10 +197,14 @@ class Remote:
     def healthy(self):
         for attempt in range(12):
             if self.supervisor:
-                status = self.run(f"sudo -n supervisorctl status {q(self.service)}", warn=True)
+                status = self.run(
+                    f"sudo -n supervisorctl status {q(self.service)}", warn=True
+                )
                 okay = status.ok and bool(re.search(r"\bRUNNING\b", status.stdout))
             else:
-                okay = self.run(f"sudo -n /sbin/service {q(self.service)} status", warn=True).ok
+                okay = self.run(
+                    f"sudo -n /sbin/service {q(self.service)} status", warn=True
+                ).ok
             if okay and self.health_url:
                 okay = self.run(
                     "code=$(curl --fail --silent --show-error --max-time 5 "
@@ -190,8 +220,13 @@ class Remote:
 
     def load_state(self, release):
         self.validate_release(release)
-        state = json.loads(self.run(f"cat {q(release + '/.deployment/state.json')}").stdout)
-        if state["service_file"] != self.service_file or state["supervisor"] != self.supervisor:
+        state = json.loads(
+            self.run(f"cat {q(release + '/.deployment/state.json')}").stdout
+        )
+        if (
+            state["service_file"] != self.service_file
+            or state["supervisor"] != self.supervisor
+        ):
             raise ValueError("Rollback service manager does not match the release")
         if state["previous"]:
             self.validate_release(state["previous"])
@@ -211,7 +246,9 @@ class Remote:
         for name, existed in state.get("shared_existed", {}).items():
             destination = self.base + "/shared/" + name
             if existed:
-                self.run(f"cp -p {q(release + '/.deployment/shared.previous.' + name)} {q(destination)}")
+                self.run(
+                    f"cp -p {q(release + '/.deployment/shared.previous.' + name)} {q(destination)}"
+                )
             else:
                 self.run(f"rm -f {q(destination)}")
         if state["previous"]:
@@ -229,14 +266,16 @@ class Remote:
 
     def cleanup(self, keep):
         # Restrict pruning to releases created by this deployment tool.
-        result = self.run(f"find {q(self.base + '/releases')} -mindepth 2 -maxdepth 2 "
-                          "-type d -name .deployment -printf '%h\\n'")
+        result = self.run(
+            f"find {q(self.base + '/releases')} -mindepth 2 -maxdepth 2 "
+            "-type d -name .deployment -printf '%h\\n'"
+        )
         current = self.current()
         protected = {current}
         if current:
             protected.add(self.load_state(current)["previous"])
         releases = sorted(result.stdout.splitlines(), reverse=True)
-        retained = set(releases[:max(keep, 2)]) | protected
+        retained = set(releases[: max(keep, 2)]) | protected
         for release in releases:
             self.validate_release(release)
             if release not in retained:

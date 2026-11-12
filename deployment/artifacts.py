@@ -15,7 +15,9 @@ def valid_url(url):
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Artifact URLs must use HTTP or HTTPS")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("Put Artifactory credentials in environment variables, not URLs")
+        raise ValueError(
+            "Put Artifactory credentials in environment variables, not URLs"
+        )
     return url
 
 
@@ -37,7 +39,9 @@ class Repository:
         elif os.environ.get("ARTIFACTORY_USERNAME"):
             password = os.environ["ARTIFACTORY_PASSWORD"]
             credentials = f"{os.environ['ARTIFACTORY_USERNAME']}:{password}".encode()
-            self.headers["Authorization"] = "Basic " + base64.b64encode(credentials).decode()
+            self.headers["Authorization"] = (
+                "Basic " + base64.b64encode(credentials).decode()
+            )
         self.origin = None
 
     def open(self, url):
@@ -46,15 +50,21 @@ class Repository:
         if self.origin is None:
             self.origin = origin
         if self.headers and origin != self.origin:
-            raise ValueError("Refusing to send Artifactory credentials to another origin")
+            raise ValueError(
+                "Refusing to send Artifactory credentials to another origin"
+            )
         # Redirects are rejected below before any second request can forward credentials.
         from urllib.request import HTTPRedirectHandler, build_opener
 
         class NoRedirect(HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
-                raise ValueError("Artifact redirects are not supported; use the canonical URL")
+                raise ValueError(
+                    "Artifact redirects are not supported; use the canonical URL"
+                )
 
-        return build_opener(NoRedirect).open(Request(url, headers=self.headers), timeout=60)
+        return build_opener(NoRedirect).open(
+            Request(url, headers=self.headers), timeout=60
+        )
 
     def resolve(self, base, artifact_path, version, suffix):
         relative_path(artifact_path, "artifact path")
@@ -62,9 +72,13 @@ class Repository:
         if version == "latest":
             with self.open(directory + "maven-metadata.xml") as response:
                 metadata = ElementTree.fromstring(response.read())
-            version = metadata.findtext("./versioning/release") or metadata.findtext("./versioning/latest")
+            version = metadata.findtext("./versioning/release") or metadata.findtext(
+                "./versioning/latest"
+            )
             if not version:
-                raise ValueError("Maven metadata does not declare a latest/release version")
+                raise ValueError(
+                    "Maven metadata does not declare a latest/release version"
+                )
             relative_path(version, "resolved version")
             directory += version + "/"
         elif not artifact_path.endswith("/" + version):
@@ -75,10 +89,12 @@ class Repository:
         candidates = set()
         for href in parser.links:
             url = urljoin(directory, href)
-            if not url.startswith(directory) or "/" in url[len(directory):]:
+            if not url.startswith(directory) or "/" in url[len(directory) :]:
                 continue
             name = unquote(urlsplit(url).path.rsplit("/", 1)[-1])
-            if name.endswith(suffix) and not re.search(r"-(sources|javadoc|tests)\.jar$", name):
+            if name.endswith(suffix) and not re.search(
+                r"-(sources|javadoc|tests)\.jar$", name
+            ):
                 valid_url(url)
                 candidates.add(url)
         if len(candidates) != 1:

@@ -14,8 +14,10 @@ def write(path, data):
 class TemplateTests(unittest.TestCase):
     def test_placeholders_are_single_pass_and_preserve_runtime_syntax(self):
         text = "a=[[x]] b={{camel}} c=${spring} d=[[:alpha:]] e=[[ -f f ]]"
-        self.assertEqual(render(text, {"x": "[[y]]"}),
-                         "a=[[y]] b={{camel}} c=${spring} d=[[:alpha:]] e=[[ -f f ]]")
+        self.assertEqual(
+            render(text, {"x": "[[y]]"}),
+            "a=[[y]] b={{camel}} c=${spring} d=[[:alpha:]] e=[[ -f f ]]",
+        )
         with self.assertRaisesRegex(ValueError, "Missing template variable: x"):
             render("[[x]]", {})
 
@@ -49,14 +51,19 @@ class TemplateTests(unittest.TestCase):
         values = {}
         for path in (ROOT / "files").rglob("*"):
             if path.is_file():
-                for name in re.findall(rb"\[\[([A-Za-z_][A-Za-z0-9_]*)\]\]", path.read_bytes()):
+                for name in re.findall(
+                    rb"\[\[([A-Za-z_][A-Za-z0-9_]*)\]\]", path.read_bytes()
+                ):
                     values[name.decode()] = f"value-{name.decode()}"
-        applications = sorted({
-            path.parent.relative_to(ROOT / "files")
-            for path in (ROOT / "files").rglob("*")
-            if path.is_file() and path.suffix in {".properties", ".xml"}
-            and len(path.relative_to(ROOT / "files").parts) >= 3
-        })
+        applications = sorted(
+            {
+                path.parent.relative_to(ROOT / "files")
+                for path in (ROOT / "files").rglob("*")
+                if path.is_file()
+                and path.suffix in {".properties", ".xml"}
+                and len(path.relative_to(ROOT / "files").parts) >= 3
+            }
+        )
         self.assertGreater(len(applications), 50)
         successful = 0
         for relative in applications:
@@ -65,7 +72,9 @@ class TemplateTests(unittest.TestCase):
                 try:
                     files = config_files(stage, application, values)
                 except ValueError as exc:
-                    self.assertIn("Flattened configuration filename collision", str(exc))
+                    self.assertIn(
+                        "Flattened configuration filename collision", str(exc)
+                    )
                     continue
                 successful += 1
                 for name, content in files.items():

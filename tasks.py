@@ -11,6 +11,7 @@ def run(action, stage, roles, application):
         args += ["--application", application]
     if main(args):
         from invoke.exceptions import Exit
+
         raise Exit(code=1)
 
 

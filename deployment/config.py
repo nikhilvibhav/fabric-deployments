@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-
 ROOT = Path(__file__).resolve().parents[1]
 # [[name]] avoids Spring/logback ${...} and Camel {{...}}, both resolved at runtime.
 PLACEHOLDER = re.compile(r"\[\[([A-Za-z_][A-Za-z0-9_]*)\]\]")
@@ -45,9 +44,12 @@ def boolean(value):
 
 
 def relative_path(value, label):
-    if not value or any(not SEGMENT.fullmatch(part) or part in {".", ".."}
-                        for part in value.split("/")):
-        raise ValueError(f"Invalid {label}: expected a relative artifact/application path")
+    if not value or any(
+        not SEGMENT.fullmatch(part) or part in {".", ".."} for part in value.split("/")
+    ):
+        raise ValueError(
+            f"Invalid {label}: expected a relative artifact/application path"
+        )
     return value
 
 
@@ -70,22 +72,33 @@ def environment(stage, root=ROOT):
     if not isinstance(document, dict) or set(document) != {"settings", "hosts"}:
         raise ValueError(f"Invalid inventory structure in {path.name}")
     supplied_settings = document["settings"]
-    if (not isinstance(supplied_settings, dict)
-            or set(supplied_settings) - {"gelf_host", "keep_releases", "use_supervisor"}
-            or type(supplied_settings.get("keep_releases", 1)) is not int
-            or supplied_settings.get("keep_releases", 1) < 1
-            or not isinstance(supplied_settings.get("use_supervisor", False), bool)
-            or ("gelf_host" in supplied_settings
-                and not isinstance(supplied_settings["gelf_host"], str))):
+    if (
+        not isinstance(supplied_settings, dict)
+        or set(supplied_settings) - {"gelf_host", "keep_releases", "use_supervisor"}
+        or type(supplied_settings.get("keep_releases", 1)) is not int
+        or supplied_settings.get("keep_releases", 1) < 1
+        or not isinstance(supplied_settings.get("use_supervisor", False), bool)
+        or (
+            "gelf_host" in supplied_settings
+            and not isinstance(supplied_settings["gelf_host"], str)
+        )
+    ):
         raise ValueError(f"Invalid environment settings in {path.name}")
     settings = {"keep_releases": 1, "use_supervisor": False, **supplied_settings}
     hosts = []
     for item in document["hosts"] if isinstance(document["hosts"], list) else ():
-        if (not isinstance(item, dict) or set(item) != {"address", "roles"}
-                or not isinstance(item["address"], str) or not item["address"]
-                or not isinstance(item["roles"], list) or not item["roles"]
-                or any(not isinstance(role, str) or not SEGMENT.fullmatch(role)
-                       for role in item["roles"])):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"address", "roles"}
+            or not isinstance(item["address"], str)
+            or not item["address"]
+            or not isinstance(item["roles"], list)
+            or not item["roles"]
+            or any(
+                not isinstance(role, str) or not SEGMENT.fullmatch(role)
+                for role in item["roles"]
+            )
+        ):
             raise ValueError(f"Invalid host entry in {path.name}")
         hosts.append(Host(item["address"], tuple(item["roles"])))
     if not hosts:
@@ -101,17 +114,28 @@ def select_hosts(hosts, roles):
     return [host.address for host in hosts if wanted.intersection(host.roles)]
 
 
-def variables(stage, application, version, second, settings, vars_file=None, environ=None,
-              secret_values=None):
+def variables(
+    stage,
+    application,
+    version,
+    second,
+    settings,
+    vars_file=None,
+    environ=None,
+    secret_values=None,
+):
     environ = os.environ if environ is None else environ
     values = dict(DEFAULTS)
     values.update({key: settings[key] for key in ("gelf_host",) if key in settings})
     if vars_file:
         supplied = json.loads(Path(vars_file).read_text())
         if not isinstance(supplied, dict) or any(
-            not isinstance(value, (str, int, float, bool)) for value in supplied.values()
+            not isinstance(value, (str, int, float, bool))
+            for value in supplied.values()
         ):
-            raise ValueError("Variables file must contain a JSON object of scalar values")
+            raise ValueError(
+                "Variables file must contain a JSON object of scalar values"
+            )
         values.update(supplied)
     environment_keys = set(DEFAULTS) | SECRET_KEYS | {"gelf_host"}
     for key in environment_keys:
@@ -120,7 +144,9 @@ def variables(stage, application, version, second, settings, vars_file=None, env
     for key, value in (secret_values or {}).items():
         # Refuse ambiguity rather than letting a stale job variable shadow a rotated secret.
         if key in environment_keys and key in environ:
-            raise ValueError(f"{key} is set both as an encrypted secret and an environment variable")
+            raise ValueError(
+                f"{key} is set both as an encrypted secret and an environment variable"
+            )
         values[key] = value
     if "java_opts" in environ and "jvm_options" not in environ:
         values["jvm_options"] = environ["java_opts"]
@@ -134,13 +160,18 @@ def variables(stage, application, version, second, settings, vars_file=None, env
     if second and version == "latest":
         raise ValueError("A second artifact requires an explicit version")
     values.update(
-        stage=stage, application=application, version=version,
+        stage=stage,
+        application=application,
+        version=version,
         application_name=PurePosixPath(application).name,
-        application_execute=PurePosixPath(application).name + (f"-{version}" if second else ""),
+        application_execute=PurePosixPath(application).name
+        + (f"-{version}" if second else ""),
         deploy_to=f"/opt/camel/{application}" + (f"-{version}" if second else ""),
     )
     for key in ("java_bin", "camel_log_dir"):
-        if not re.fullmatch(r"/[A-Za-z0-9_/.-]+", str(values[key])) or ".." in str(values[key]).split("/"):
+        if not re.fullmatch(r"/[A-Za-z0-9_/.-]+", str(values[key])) or ".." in str(
+            values[key]
+        ).split("/"):
             raise ValueError(f"{key} must be an absolute path without whitespace")
     if any(character in options for character in "\r\n"):
         raise ValueError("JVM options cannot contain line breaks")
@@ -161,7 +192,9 @@ def utf8(data, path):
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        raise ValueError(f"{path.name} is not valid UTF-8 and cannot be rendered") from None
+        raise ValueError(
+            f"{path.name} is not valid UTF-8 and cannot be rendered"
+        ) from None
 
 
 def render_file(path, values):
