@@ -210,11 +210,11 @@ class ArtifactTests(unittest.TestCase):
     def test_download_checksum(self):
         repo = Repository()
         repo.open = MagicMock(return_value=io.BytesIO(b"artifact"))
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                repo.download(
-                    "https://repo/app.jar", Path(directory) / "app.jar", "bad"
-                )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, "SHA-256 mismatch"),
+        ):
+            repo.download("https://repo/app.jar", Path(directory) / "app.jar", "bad")
 
     def test_artifacts_are_resolved_as_jars(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -277,13 +277,15 @@ class ArtifactTests(unittest.TestCase):
                 "https://repo/service.zip",
             ]
         )
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "must point to a JAR"):
-                cli.prepare_bundle(
-                    args,
-                    {"application": "service", "application_name": "service"},
-                    Path(directory),
-                )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, "must point to a JAR"),
+        ):
+            cli.prepare_bundle(
+                args,
+                {"application": "service", "application_name": "service"},
+                Path(directory),
+            )
 
 
 class RemoteTests(unittest.TestCase):
@@ -499,9 +501,9 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
+            self.assertRaisesRegex(RuntimeError, "locked"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "locked"):
-                cli.execute(self.args())
+            cli.execute(self.args())
         prepare.assert_not_called()
         first.activate.assert_not_called()
         first.close.assert_called_once()

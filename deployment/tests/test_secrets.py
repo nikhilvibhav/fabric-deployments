@@ -184,9 +184,9 @@ class DeploymentIntegrationTests(unittest.TestCase):
             patch.object(secrets, "read_store", return_value={"password": "x"}),
             patch("deployment.remote.Remote") as remote,
             self.assertRaisesRegex(ValueError, "supply --secrets-key"),
+            patch("os.environ", {}),
         ):
-            with patch("os.environ", {}):
-                cli.execute(self.args("deploy"))
+            cli.execute(self.args("deploy"))
         remote.assert_not_called()
 
     def test_decrypted_secret_is_rendered_into_uploaded_configuration(self):

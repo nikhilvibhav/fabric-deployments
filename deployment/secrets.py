@@ -172,7 +172,7 @@ def unseal(private_key, stage, application, name, ciphertext):
             f"Secret {name} was encrypted for a different stage, application or name"
         )
     if not isinstance(payload.get("value"), str):
-        raise ValueError(f"Secret {name} has an invalid value")
+        raise TypeError(f"Secret {name} has an invalid value")
     return payload["value"]
 
 
