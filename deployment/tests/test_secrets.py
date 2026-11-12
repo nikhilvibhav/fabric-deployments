@@ -117,7 +117,8 @@ class DeploymentIntegrationTests(unittest.TestCase):
         return cli.parser().parse_args(argv + (["--secrets-key", key] if key else []))
 
     def test_plan_without_key_lists_names_and_never_decrypts(self):
-        with patch.object(cli, "read_store", return_value={"jdbc_database_password": "x"}), \
+        with patch.dict(os.environ, {secrets.KEY_ENV: ""}), \
+                patch.object(cli, "read_store", return_value={"jdbc_database_password": "x"}), \
                 patch.object(cli, "decrypt_all") as decrypt, \
                 redirect_stdout(io.StringIO()) as output:
             cli.execute(self.args("plan"))
