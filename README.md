@@ -1,5 +1,7 @@
 # Fabric/Invoke deployments
 
+[![Lint and Unit Tests](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml/badge.svg)](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml)
+
 The Python deployment CLI uses SSH/SFTP through Fabric to deploy JAR artifacts
 from Artifactory together with configuration from this repository. It does not
 build microservices and does not require Jenkins.
