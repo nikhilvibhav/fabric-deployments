@@ -136,7 +136,7 @@ the code on 2026-11-12.
 ## Suggested order
 
 1. ✅ Stop `secrets verify` from printing values (done).
-2. Migrate the remaining plaintext credentials to encrypted secrets and rotate
+2. ✅ Migrate the remaining plaintext credentials to encrypted secrets and rotate
    them; remove committed private keys.
 3. Use HTTPS for Artifactory, refuse credentials over HTTP, and require
    digests for production.
