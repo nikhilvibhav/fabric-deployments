@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from nacl.bindings import crypto_box_SEALBYTES
@@ -25,6 +26,7 @@ from .config import DEFAULTS, ROOT, SEGMENT, relative_path, template_names
 
 FORMAT_VERSION = 1
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 KEY_ENV = "CAMEL_SECRETS_KEY_FILE"
 # Property keys whose literal values should be encrypted secrets instead.
 SENSITIVE_PROPERTY = re.compile(
@@ -52,17 +54,39 @@ def secrets_dir(stage, root=ROOT):
     return root / "secrets" / stage
 
 
+def active_data_dir(stage, root=ROOT):
+    """Return the active generation directory, or the legacy stage directory."""
+    stage_root = secrets_dir(stage, root)
+    current_file = stage_root / "CURRENT"
+
+    # Existing stages use the legacy layout until first generation is activated.
+    if not current_file.exists():
+        return stage_root
+
+    generation = current_file.read_text(encoding="ascii").strip()
+    if not GENERATION_ID.fullmatch(generation):
+        raise ValueError(f"Invalid CURRENT file for stage {stage}")
+
+    directory = stage_root / ".generations" / generation
+    if not directory.is_dir():
+        raise ValueError(f"Active secrets generation is missing for stage {stage}")
+    return directory
+
+
+def _secrets_path_in(data_dir, application):
+    """Return an application's store path within a particular directory."""
+    relative_path(application, "application")
+    return data_dir.joinpath(*application.split("/")).with_suffix(".json")
+
+
 def public_key_path(stage, root=ROOT):
     """Return the path to a stage's committed public key."""
-    return secrets_dir(stage, root) / "public.key"
+    return active_data_dir(stage, root) / "public.key"
 
 
 def secrets_path(stage, application, root=ROOT):
     """Return the validated encrypted store path for an application."""
-    relative_path(application, "application")
-    return (
-        secrets_dir(stage, root).joinpath(*application.split("/")).with_suffix(".json")
-    )
+    return _secrets_path_in(active_data_dir(stage, root), application)
 
 
 def encode(data):
@@ -128,9 +152,9 @@ def load_private_key(path, stage, root=ROOT):
     return key
 
 
-def read_store(stage, application, root=ROOT):
-    """Read and validate an application's encrypted secret mapping."""
-    path = secrets_path(stage, application, root)
+def _read_store_in(data_dir, application):
+    """Read and validate an application's store from a specific directory."""
+    path = _secrets_path_in(data_dir, application)
     if not path.is_file():
         return {}
     data = json.loads(path.read_text())
@@ -143,9 +167,14 @@ def read_store(stage, application, root=ROOT):
     return data["values"]
 
 
-def write_store(stage, application, values, root=ROOT):
-    """Persist encrypted values in sorted JSON, removing an empty store."""
-    path = secrets_path(stage, application, root)
+def read_store(stage, application, root=ROOT):
+    """Read an application's store from its active generation."""
+    return _read_store_in(active_data_dir(stage, root), application)
+
+
+def _write_store_in(data_dir, application, values):
+    """Persist encrypted values in sorted JSON into a specific directory."""
+    path = _secrets_path_in(data_dir, application)
     if not values:
         path.unlink(missing_ok=True)
         return
@@ -157,6 +186,11 @@ def write_store(stage, application, values, root=ROOT):
         )
         + "\n",
     )
+
+
+def write_store(stage, application, values, root=ROOT):
+    """Persist encrypted values in sorted JSON into the application's active directory."""
+    _write_store_in(active_data_dir(stage, root), application, values)
 
 
 def validate_name(name):
@@ -233,31 +267,63 @@ def keygen(stage, private_key_out, root=ROOT):
 
 
 def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
-    """Decrypt all stage stores, rotate the key, and re-encrypt every value."""
+    """Build and verify a new secrets generation, then activate it with CURRENT."""
+    stage_root = secrets_dir(stage, root)
+    data_dir, store_paths = _active_store_files(stage, root)
+
+    # Read and decrypt every current store before creating or activating anything.
     old_key = load_private_key(old_key_file, stage, root)
     stores = {}
-    for path in sorted(secrets_dir(stage, root).rglob("*.json")):
-        application = (
-            path.relative_to(secrets_dir(stage, root)).with_suffix("").as_posix()
-        )
+    for path in store_paths:
+        application = path.relative_to(data_dir).with_suffix("").as_posix()
+        sealed = _read_store_in(data_dir, application)
         # Decrypt everything first so a bad entry aborts before any file changes.
         stores[application] = {
             name: unseal(old_key, stage, application, name, ciphertext)
-            for name, ciphertext in read_store(stage, application, root).items()
+            for name, ciphertext in sealed.items()
         }
+
+    generation = uuid.uuid4().hex
+    generations_dir = stage_root / ".generations"
+    temporary_dir = generations_dir / (".tmp-" + generation)
+    final_dir = generations_dir / generation
+
     new_key = PrivateKey.generate()
-    write_private_key(new_private_key_out, new_key)
+
+    # Build the new generation without changing the active one.
+    write_atomic(temporary_dir / "public.key", encode(new_key.public_key) + "\n")
+
     for application, values in stores.items():
-        write_store(
-            stage,
-            application,
-            {
-                name: seal(new_key.public_key, stage, application, name, value)
-                for name, value in values.items()
-            },
-            root,
-        )
-    write_atomic(public_key_path(stage, root), encode(new_key.public_key) + "\n")
+        encrypted = {
+            name: seal(new_key.public_key, stage, application, name, value)
+            for name, value in values.items()
+        }
+        _write_store_in(temporary_dir, application, encrypted)
+
+    # Read the staged stores back to prove the new key decrypts them correctly.
+    for application, expected_values in stores.items():
+        staged_values = _read_store_in(temporary_dir, application)
+        if set(staged_values) != set(expected_values):
+            raise ValueError(f"Staged secrets did not verify for {stage}/{application}")
+
+        for name, expected_value in expected_values.items():
+            actual_value = unseal(
+                new_key, stage, application, name, staged_values[name]
+            )
+            if actual_value != expected_value:
+                raise ValueError(
+                    f"Staged secrets did not verify: {stage}/{application}/{name}"
+                )
+
+    # Save the private key before activation. Keep it outside of the repository.
+    write_private_key(new_private_key_out, new_key)
+
+    # Publish the complete generation, then switch the active pointer in CURRENT.
+    if final_dir.exists():
+        raise FileExistsError(f"Secrets generation already exists: {generation}")
+    os.rename(temporary_dir, final_dir)
+    write_atomic(stage_root / "CURRENT", generation + "\n")
+
     return len(stores)
 
 
@@ -319,6 +385,23 @@ def check_store(stage, application, root, errors, warnings):
             )
 
 
+def _active_store_files(stage, root=ROOT):
+    """Return the active data dir and its application store files."""
+    data_dir = active_data_dir(stage, root)
+    stage_root = secrets_dir(stage, root)
+    paths = sorted(data_dir.rglob("*.json"))
+
+    # No CURRENT means legacy layout; ignore inactive generations and staging files
+    if data_dir == stage_root:
+        paths = [
+            path
+            for path in paths
+            if path.relative_to(stage_root).parts[0] != ".generations"
+        ]
+
+    return data_dir, paths
+
+
 def check(stage=None, application=None, root=ROOT):
     """Validate secrets stores without a private key; returns (errors, warnings)."""
     errors, warnings = [], []
@@ -331,13 +414,13 @@ def check(stage=None, application=None, root=ROOT):
     else:
         stages = []
     for stage_name in stages:
-        directory = secrets_dir(stage_name, root)
+        data_dir, store_paths = _active_store_files(stage_name, root)
         applications = (
             [application]
             if application
             else [
-                path.relative_to(directory).with_suffix("").as_posix()
-                for path in sorted(directory.rglob("*.json"))
+                path.relative_to(data_dir).with_suffix("").as_posix()
+                for path in store_paths
             ]
         )
         if applications:

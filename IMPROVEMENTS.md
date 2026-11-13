@@ -52,13 +52,13 @@ than the Python logic.
 
    How serious this is depends on whether the internal network path is trusted.
 
-4. **Rekey isn't atomic** (MEDIUM, earlier review #4).
-   `rekey` (`deployment/secrets.py`) rewrites each application's store in
-   place before it replaces `public.key`. If it is interrupted or a write
-   fails, stores can end up encrypted to different keys while the old public
-   key stays in place. Write all re-encrypted stores to temp files first, then
-   `os.replace` them together with `public.key`. Alternatively, write the new
-   key to the side and print recovery instructions if rekeying fails partway.
+4. ✅ **Fixed: Rekey wasn't atomic** (MEDIUM, earlier review #4).
+   `rekey` (`deployment/secrets.py`) now builds and verifies all re-encrypted
+   stores in a new `.generations/<id>/` directory before activating it. It then
+   atomically replaces the small `CURRENT` pointer file; readers therefore use
+   either the previous complete generation or the new complete generation.
+   The previous generation is retained for recovery. Commit `CURRENT` and its
+   selected generation together.
 
 ## 🟠 CI/CD workflow (`.github/workflows/tests.yaml`)
 

@@ -13,4 +13,4 @@ __pycache__/
 # Stage private keys must never be committed; only public.key belongs in Git.
 *.private.key
 secrets/**/*.key
-!secrets/*/public.key
+!secrets/**/public.key

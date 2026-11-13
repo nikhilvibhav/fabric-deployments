@@ -111,6 +111,35 @@ class SecretStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not belong"):
             secrets.decrypt_all("qa", "app", self.key, self.root)
 
+    def test_failed_rekey_activation_keeps_previous_generation_active(self):
+        """Keep the current generation readable when replacing CURRENT fails."""
+        self.store("app", "password", "value")
+        first_new_key = self.root / "qa-first-new.private.key"
+        secrets.rekey("qa", self.key, first_new_key, self.root)
+
+        current = self.root / "secrets" / "qa" / "CURRENT"
+        previous_generation = current.read_text()
+        second_new_key = self.root / "qa-second-new.private.key"
+        write_atomic = secrets.write_atomic
+
+        def fail_pointer_replacement(path, text):
+            """Simulate failure while committing the new active generation."""
+            if Path(path) == current:
+                raise OSError("simulated pointer replacement failure")
+            write_atomic(path, text)
+
+        with (
+            patch.object(secrets, "write_atomic", side_effect=fail_pointer_replacement),
+            self.assertRaisesRegex(OSError, "pointer replacement failure"),
+        ):
+            secrets.rekey("qa", first_new_key, second_new_key, self.root)
+
+        self.assertEqual(current.read_text(), previous_generation)
+        self.assertEqual(
+            secrets.decrypt_all("qa", "app", first_new_key, self.root),
+            {"password": "value"},
+        )
+
     @unittest.skipUnless(os.name == "posix", "POSIX permission check")
     def test_group_readable_private_key_is_rejected(self):
         """Reject private keys readable by group or other POSIX users."""

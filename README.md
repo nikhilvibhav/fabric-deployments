@@ -177,15 +177,19 @@ Secrets live in Git, encrypted per environment with public-key cryptography
 (libsodium sealed boxes via PyNaCl). No Vault, Jenkins credentials, or other
 service is required, so this works with any future CI/CD tool.
 
-- `secrets/STAGE/public.key` (committed) encrypts. Anyone can add or rotate a
-  value with it but cannot read existing values.
+- `secrets/STAGE/CURRENT` (committed) selects the active secrets generation.
+  Stages without this file still use the legacy layout until their first rekey.
+- `secrets/STAGE/.generations/GENERATION/` contains that generation's
+  `public.key` and application JSON stores. The public key (committed) encrypts;
+  anyone can add or rotate a value with it but cannot read existing values.
 - The stage **private key** decrypts. It is held only by the deployment
   controller/operators, outside Git, and is supplied via `--secrets-key PATH`
   or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key: a QA key cannot
   decrypt production secrets, and a mismatched key is rejected.
-- `secrets/STAGE/APPLICATION.json` (committed) holds one sealed value per name.
-  Names stay readable for review; values do not. Each value is bound to its
-  stage, application and name, so ciphertext cannot be copied elsewhere.
+- Each application JSON store (committed inside the active generation) holds
+  one sealed value per name. Names stay readable for review; values do not.
+  Each value is bound to its stage, application and name, so ciphertext cannot
+  be copied elsewhere. `set` and `unset` modify stores in the active generation.
 
 Names are the existing template variables, e.g. `jdbc_database_password`,
 `mongodb_password`, or any `[[name]]` used by the application's templates.
@@ -194,7 +198,7 @@ Values are decrypted in memory and rendered into the release
 arguments or paths (`jvm_options`, `java_bin`, `deploy_to`, etc.) are refused.
 
 ```sh
-# One-time per stage (operator): creates secrets/qa/public.key; commit it.
+# One-time per stage (operator): creates a public key; commit it.
 python -m deployment secrets keygen --stage qa --private-key-out /secure/qa.private.key
 
 # Add or rotate a value (anyone; prompts twice, or use --value-from - for stdin).
@@ -257,8 +261,13 @@ before connecting to any host when secrets exist and no valid key is supplied.
 - Never commit private keys. `.gitignore` excludes `*.private.key` and any
   `*.key` under `secrets/` except `public.key`, but check before committing.
 - Rotate a key with `secrets rekey --stage qa --old-key OLD --private-key-out NEW`.
-  It decrypts every application file for the stage first, re-encrypts all of
-  them, and replaces `public.key`. Commit the result, then destroy the old key.
+  It decrypts every active application store, writes and verifies a complete new
+  generation, then atomically switches `CURRENT`. The old generation remains
+  available as a recovery copy. Commit `CURRENT` and the new generation
+  together, then destroy the old private key only after verifying the new one.
+  Do not run `set`, `unset`, or another `rekey` for the same stage concurrently.
+  When rekeying a legacy-layout stage, its old root-level files remain inactive
+  after the switch; `CURRENT` determines which files are active.
 - Git history keeps old ciphertext. If a private key leaks, rekeying is not
   enough: **rotate the actual secret values** (database passwords, etc.) too.
 - Revoking a person's ability to *add* secrets is not needed (encryption-only).
