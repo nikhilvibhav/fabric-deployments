@@ -149,7 +149,6 @@ class ArtifactTests(unittest.TestCase):
 
                 def log_message(self, *args):
                     """Suppress routine HTTP server request logging."""
-                    pass
 
             server = ThreadingHTTPServer(
                 ("127.0.0.1", 0), partial(Handler, directory=directory)

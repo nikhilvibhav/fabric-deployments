@@ -187,6 +187,7 @@ def variables(
 
 def render(text, values):
     """Substitute deployment placeholders once, failing for missing values."""
+
     def replace(match):
         """Resolve one placeholder from the supplied variable mapping."""
         key = match.group(1)
