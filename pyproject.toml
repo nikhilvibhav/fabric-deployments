@@ -15,9 +15,33 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.1",
     "ruff>=0.17.4",
+    "types-paramiko>=5.1.0",
 ]
 
 [tool.uv]
 # An application run with `python -m deployment`, not an installable package.
 package = false
+
+[tool.ruff.lint]
+# Defaults plus bugbear, bandit (security), pyupgrade and import sorting.
+extend-select = ["B", "S", "UP", "I"]
+ignore = ["BLE001"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["deployment", "tasks.py"]
+# Type-check function bodies even before every signature is annotated.
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Fabric ships no type information.
+module = ["fabric", "fabric.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests replace methods with mocks on purpose.
+module = ["deployment.tests.*"]
+disable_error_code = ["method-assign"]

@@ -14,8 +14,8 @@ from deployment import secrets
 from deployment.config import variables
 
 
-class SecretStoreTests(unittest.TestCase):
-    """Test encrypted secret storage, key management, and secret CLI operations."""
+class TemporaryStoreTestCase(unittest.TestCase):
+    """Provide an isolated QA secret store with a generated key pair."""
 
     def setUp(self):
         """Create an isolated QA secret store and generate its key pair."""
@@ -35,6 +35,10 @@ class SecretStoreTests(unittest.TestCase):
             secrets.load_public_key(stage, self.root), stage, application, name, value
         )
         secrets.write_store(stage, application, sealed, self.root)
+
+
+class SecretStoreTests(TemporaryStoreTestCase):
+    """Test encrypted secret storage, key management, and secret CLI operations."""
 
     def test_round_trip_keeps_names_readable_and_values_encrypted(self):
         """Keep secret names visible while encrypting values that decrypt correctly."""
@@ -169,7 +173,7 @@ class SecretStoreTests(unittest.TestCase):
 
         def git(*args):
             """Run git in the temporary repository with a fixed identity."""
-            return subprocess.run(
+            return subprocess.run(  # noqa: S603 - fixed git arguments
                 ["git", "-c", "user.name=test", "-c", "user.email=test@example.com"]
                 + list(args),
                 cwd=self.root,
@@ -234,23 +238,14 @@ class SecretStoreTests(unittest.TestCase):
         )
 
 
-class CheckAndVerifyTests(unittest.TestCase):
+class CheckAndVerifyTests(TemporaryStoreTestCase):
     """Test keyless store validation and private-key secret verification."""
 
     def setUp(self):
         """Create an isolated QA store and fallback configuration templates."""
-        self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name)
-        self.key = self.root / "qa.private.key"
-        secrets.keygen("qa", self.key, self.root)
+        super().setUp()
         for name in ("application.properties", "logback.xml", "logback-access.xml"):
             self.write(Path("files") / name, "fallback\n")
-
-    def tearDown(self):
-        """Remove the temporary test directory."""
-        self.directory.cleanup()
-
-    store = SecretStoreTests.store
 
     def write(self, relative, text):
         """Write text beneath the temporary repository root."""

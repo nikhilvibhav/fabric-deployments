@@ -25,6 +25,9 @@ jobs:
             - name: Check code formatting
               run: uv run --locked ruff format --check deployment
 
+            - name: Type check
+              run: uv run --locked mypy
+
     secrets:
         runs-on: ubuntu-latest
 

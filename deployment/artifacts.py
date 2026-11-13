@@ -75,7 +75,8 @@ class Repository:
                 )
 
         return build_opener(NoRedirect).open(
-            Request(url, headers=self.headers), timeout=60
+            Request(url, headers=self.headers),  # noqa: S310 - valid_url allows only http(s)
+            timeout=60,
         )
 
     def resolve(self, base, artifact_path, version, suffix):
@@ -84,7 +85,9 @@ class Repository:
         directory = valid_url(base.rstrip("/") + "/" + artifact_path.strip("/") + "/")
         if version == "latest":
             with self.open(directory + "maven-metadata.xml") as response:
-                metadata = ElementTree.fromstring(response.read())
+                # ElementTree never fetches external entities, and expat >= 2.4.1
+                # (bundled with supported Pythons) limits entity expansion.
+                metadata = ElementTree.fromstring(response.read())  # noqa: S314
             version = metadata.findtext("./versioning/release") or metadata.findtext(
                 "./versioning/latest"
             )

@@ -9,6 +9,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from deployment import __main__ as cli
@@ -317,7 +318,8 @@ class RemoteTests(unittest.TestCase):
         self.values = variables(
             "qa", "authentication-service", "1", False, settings, environ={}
         )
-        self.remote = Remote("test@example.invalid", self.values, True)
+        # Any: these tests replace Remote methods with mocks.
+        self.remote: Any = Remote("test@example.invalid", self.values, True)
         self.remote.run = MagicMock(return_value=SimpleNamespace(ok=True, stdout=""))
         self.remote.put = MagicMock()
         self.remote.exists = MagicMock(return_value=False)

@@ -377,7 +377,8 @@ def check_store(stage, application, root, errors, warnings, expected_key_id=None
 
 def check(stage=None, application=None, root=ROOT):
     """Validate secrets stores without a private key; returns (errors, warnings)."""
-    errors, warnings = [], []
+    errors: list[str] = []
+    warnings: list[str] = []
     if stage:
         stages = [stage]
     elif (root / "secrets").is_dir():

@@ -106,15 +106,22 @@ test already covers rendering.
 
 ## 🟢 Nice to have
 
-- **Add a `pyproject.toml`** to hold project metadata,
-  `requires-python = ">=3.11"`, the ruff config, dev dependencies, and a
-  `camel-deploy` console script. It replaces the bare `ruff.toml` and
-  `requirements.txt`.
-- **Broaden ruff rules.** Running `E,F,B,UP,S,SIM,I,PL,RUF` produced 44 hits,
-  none serious. Adding `B`, `S` (bandit), `UP` and `I` is cheap, and `S`
-  catches regressions in a security-sensitive tool.
-- **Add type hints and run mypy.** Fabric/paramiko call sites and the
-  inventory dicts would benefit most.
+- ✅ **Done: `pyproject.toml`** holds project metadata,
+  `requires-python = ">=3.11"`, dependencies (locked in `uv.lock`), dev
+  dependencies and the ruff and mypy config. It replaces `ruff.toml` and
+  `requirements.txt`. A `camel-deploy` console script was dropped: the
+  project is run with `python -m deployment` (`package = false`).
+- ✅ **Done: broader ruff rules.** `B`, `S` (bandit), `UP` and `I` are
+  enabled on top of the defaults. Their three hits were false positives,
+  each suppressed with a reason: URL schemes are validated, ElementTree
+  doesn't resolve external entities, and a test runs `git` with fixed
+  arguments.
+- **Type hints and mypy.**
+  - ✅ mypy runs in CI with `check_untyped_defs`, so function bodies are
+    checked even before they are annotated.
+  - ❌ Still open: function signatures have no annotations yet. Start with
+    Fabric/paramiko call sites and the inventory dicts, then enable
+    `disallow_untyped_defs` module by module.
 - **`lookup-hostnames.sh` hardcodes a username and the inventory IPs.** Read
   the IPs from `deployment/inventories/*.json` so the two can't drift, and
   take the user as a parameter.

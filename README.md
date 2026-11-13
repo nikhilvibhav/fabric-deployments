@@ -371,4 +371,10 @@ Run the test suite from the repository root:
 python -m unittest discover -s deployment/tests -v
 ```
 
+CI also lints, checks formatting and type-checks. Run the same checks locally:
+
+```sh
+uv run ruff check . && uv run ruff format --check . && uv run mypy
+```
+
 The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to internal environments and do not replace the QA pilot or operations review.
