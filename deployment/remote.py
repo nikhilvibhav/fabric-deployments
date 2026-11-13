@@ -15,11 +15,15 @@ from .config import ROOT, render_file
 
 
 def q(value):
+    """Shell-quote a value before including it in a remote command."""
     return shlex.quote(str(value))
 
 
 class Remote:
+    """Manage a locked application deployment on one SSH host."""
+
     def __init__(self, host, values, supervisor, health_url=None):
+        """Configure the SSH connection and service details for a host."""
         self.connection = Connection(host, connect_timeout=20)
         self.connection.client.load_system_host_keys()
         self.connection.client.set_missing_host_key_policy(RejectPolicy())
@@ -36,6 +40,7 @@ class Remote:
         self.locked = False
 
     def run(self, command, **kwargs):
+        """Run a remote command and log its context without exposing command output."""
         try:
             return self.connection.run(command, hide=True, timeout=120, **kwargs)
         except (UnexpectedExit, CommandTimedOut):
@@ -46,12 +51,15 @@ class Remote:
             raise
 
     def put(self, content, path):
+        """Upload in-memory bytes to a remote path."""
         self.connection.put(io.BytesIO(content), remote=path)
 
     def exists(self, path):
+        """Return whether a remote path exists."""
         return self.run(f"test -e {q(path)}", warn=True).ok
 
     def lock(self):
+        """Create the host's deployment lock and check service-manager conflicts."""
         # mkdir is also an atomic cross-job lock; never steal a stale lock automatically.
         self.run(f"mkdir -p {q(self.base + '/releases')} {q(self.base + '/shared')}")
         self.run(f"mkdir {q(self.base + '/.deploy-lock')}")
@@ -62,6 +70,7 @@ class Remote:
             )
 
     def close(self):
+        """Release the deployment lock and close the SSH connection."""
         try:
             if self.locked:
                 self.run(f"rmdir {q(self.base + '/.deploy-lock')}")
@@ -69,6 +78,7 @@ class Remote:
             self.connection.close()
 
     def current(self):
+        """Return the validated active release path, or None if none is active."""
         path = self.base + "/current"
         if not self.run(f"test -L {q(path)}", warn=True).ok:
             if self.exists(path):
@@ -82,6 +92,7 @@ class Remote:
         return target
 
     def validate_release(self, path):
+        """Ensure a release path is a direct child of this application's releases."""
         parent = str(PurePosixPath(path).parent)
         if parent != self.base + "/releases" or not re.fullmatch(
             r"[A-Za-z0-9_.-]+", PurePosixPath(path).name
@@ -91,6 +102,7 @@ class Remote:
             )
 
     def prepare(self, bundle, release, metadata, shared):
+        """Upload a release and stage its service, shared files, and rollback state."""
         self.validate_release(release)
         self.run(f"mkdir {q(release)} && mkdir -m 700 {q(release + '/.deployment')}")
         for path in sorted(bundle.rglob("*")):
@@ -149,6 +161,7 @@ class Remote:
         return state
 
     def switch(self, release):
+        """Atomically point the current symlink at a validated release."""
         self.validate_release(release)
         temporary = self.base + "/.current-" + uuid.uuid4().hex
         self.run(
@@ -156,6 +169,7 @@ class Remote:
         )
 
     def activate(self, release):
+        """Install staged files, switch releases, restart the service, and verify health."""
         state = self.load_state(release)
         for name in state["shared_existed"]:
             self.run(
@@ -179,6 +193,7 @@ class Remote:
         self.healthy()
 
     def lifecycle(self, action):
+        """Apply a service lifecycle action, avoiding redundant known transitions."""
         if self.supervisor:
             status = self.run(
                 f"sudo -n supervisorctl status {q(self.service)}", warn=True
@@ -195,6 +210,7 @@ class Remote:
             self.run(f"sudo -n /sbin/service {q(self.service)} {action}")
 
     def healthy(self):
+        """Wait for the service and optional HTTP endpoint to become healthy."""
         for attempt in range(12):
             if self.supervisor:
                 status = self.run(
@@ -219,6 +235,7 @@ class Remote:
         raise RuntimeError("Service did not become healthy within the startup window")
 
     def load_state(self, release):
+        """Load and validate rollback metadata for a release."""
         self.validate_release(release)
         state = json.loads(
             self.run(f"cat {q(release + '/.deployment/state.json')}").stdout
@@ -235,6 +252,7 @@ class Remote:
         return state
 
     def restore(self, release, state):
+        """Restore the prior service definition, shared files, and active release."""
         if state["service_existed"]:
             self.run(
                 f"sudo -n cp -p {q(release + '/.deployment/service.previous')} {q(self.service_file)}"
@@ -265,6 +283,7 @@ class Remote:
             self.healthy()
 
     def cleanup(self, keep):
+        """Prune old managed releases while retaining current and rollback targets."""
         # Restrict pruning to releases created by this deployment tool.
         result = self.run(
             f"find {q(self.base + '/releases')} -mindepth 2 -maxdepth 2 "

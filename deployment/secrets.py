@@ -46,16 +46,19 @@ RESERVED = {
 
 
 def secrets_dir(stage, root=ROOT):
+    """Return the validated directory holding secrets for a stage."""
     if not SEGMENT.fullmatch(stage) or stage in {".", ".."}:
         raise ValueError("Invalid stage")
     return root / "secrets" / stage
 
 
 def public_key_path(stage, root=ROOT):
+    """Return the path to a stage's committed public key."""
     return secrets_dir(stage, root) / "public.key"
 
 
 def secrets_path(stage, application, root=ROOT):
+    """Return the validated encrypted store path for an application."""
     relative_path(application, "application")
     return (
         secrets_dir(stage, root).joinpath(*application.split("/")).with_suffix(".json")
@@ -63,10 +66,12 @@ def secrets_path(stage, application, root=ROOT):
 
 
 def encode(data):
+    """Encode bytes or key material as base64 text."""
     return base64.b64encode(bytes(data)).decode()
 
 
 def decode(text, label):
+    """Decode strict base64 text and identify malformed input by label."""
     try:
         return base64.b64decode(text.strip(), validate=True)
     except ValueError:
@@ -74,6 +79,7 @@ def decode(text, label):
 
 
 def write_atomic(path, text):
+    """Write text through a sibling temporary file and atomically replace the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
     try:
@@ -86,6 +92,7 @@ def write_atomic(path, text):
 
 
 def write_private_key(path, key):
+    """Create a private key file without overwriting existing files."""
     path = Path(path)
     # O_EXCL never overwrites an existing key; 0600 limits access on POSIX.
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -94,6 +101,7 @@ def write_private_key(path, key):
 
 
 def load_public_key(stage, root=ROOT):
+    """Load and validate the 32-byte public key for a stage."""
     path = public_key_path(stage, root)
     if not path.is_file():
         raise ValueError(f"No public key for stage {stage}; run 'secrets keygen' first")
@@ -104,6 +112,7 @@ def load_public_key(stage, root=ROOT):
 
 
 def load_private_key(path, stage, root=ROOT):
+    """Load a protected private key and verify that it matches the stage key."""
     path = Path(path)
     if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
         raise ValueError(
@@ -120,6 +129,7 @@ def load_private_key(path, stage, root=ROOT):
 
 
 def read_store(stage, application, root=ROOT):
+    """Read and validate an application's encrypted secret mapping."""
     path = secrets_path(stage, application, root)
     if not path.is_file():
         return {}
@@ -134,6 +144,7 @@ def read_store(stage, application, root=ROOT):
 
 
 def write_store(stage, application, values, root=ROOT):
+    """Persist encrypted values in sorted JSON, removing an empty store."""
     path = secrets_path(stage, application, root)
     if not values:
         path.unlink(missing_ok=True)
@@ -149,6 +160,7 @@ def write_store(stage, application, values, root=ROOT):
 
 
 def validate_name(name):
+    """Reject invalid or deployment-reserved secret names."""
     if not NAME.fullmatch(name):
         raise ValueError(f"Invalid secret name: {name}")
     if name in RESERVED:
@@ -158,6 +170,7 @@ def validate_name(name):
 
 
 def bound_payload(stage, application, name, value):
+    """Serialize a secret with its stage, application, and name identity."""
     # Binding identity into the plaintext stops ciphertext being moved between apps or names.
     return json.dumps(
         {"stage": stage, "application": application, "name": name, "value": value}
@@ -165,12 +178,14 @@ def bound_payload(stage, application, name, value):
 
 
 def seal(public_key, stage, application, name, value):
+    """Encrypt a value in a sealed box with its identity bound into the payload."""
     return encode(
         SealedBox(public_key).encrypt(bound_payload(stage, application, name, value))
     )
 
 
 def unseal(private_key, stage, application, name, ciphertext):
+    """Decrypt a secret and verify its bound identity and string value."""
     try:
         payload = json.loads(SealedBox(private_key).decrypt(decode(ciphertext, name)))
     except CryptoError:
@@ -189,6 +204,7 @@ def unseal(private_key, stage, application, name, ciphertext):
 
 
 def decrypt_all(stage, application, key_file, root=ROOT):
+    """Decrypt every stored secret for an application using its stage key."""
     sealed = read_store(stage, application, root)
     if not sealed:
         return {}
@@ -205,6 +221,7 @@ def decrypt_all(stage, application, key_file, root=ROOT):
 
 
 def keygen(stage, private_key_out, root=ROOT):
+    """Generate a stage key pair, storing the private key separately from the public key."""
     public_path = public_key_path(stage, root)
     if public_path.exists():
         raise ValueError(
@@ -216,6 +233,7 @@ def keygen(stage, private_key_out, root=ROOT):
 
 
 def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
+    """Decrypt all stage stores, rotate the key, and re-encrypt every value."""
     old_key = load_private_key(old_key_file, stage, root)
     stores = {}
     for path in sorted(secrets_dir(stage, root).rglob("*.json")):
@@ -260,6 +278,7 @@ def plaintext_properties(content):
 
 
 def check_store(stage, application, root, errors, warnings):
+    """Validate one application's encrypted store and report template/property issues."""
     label = f"{stage}/{application}"
     try:
         sealed = read_store(stage, application, root)
@@ -332,6 +351,7 @@ def check(stage=None, application=None, root=ROOT):
 
 
 def compare_value(name, actual):
+    """Prompt securely for an expected value and compare it without timing leakage."""
     if not sys.stdin.isatty():
         raise ValueError("--compare needs an interactive terminal")
     expected = getpass.getpass(f"Expected value for {name}: ")
@@ -340,6 +360,7 @@ def compare_value(name, actual):
 
 
 def read_value(source):
+    """Read a secret from standard input or prompt twice for confirmation."""
     if source == "-":
         value = sys.stdin.read()
         return value.removesuffix("\n")
@@ -352,6 +373,7 @@ def read_value(source):
 
 
 def parser():
+    """Build the argument parser for secret-management subcommands."""
     result = argparse.ArgumentParser(
         prog="python -m deployment secrets",
         description="Manage encrypted per-environment secrets",
@@ -402,6 +424,7 @@ def parser():
 
 
 def run(argv, root=ROOT):
+    """Execute a secret-management command against the selected repository root."""
     args = parser().parse_args(argv)
     if args.command == "keygen":
         keygen(args.stage, args.private_key_out, root)

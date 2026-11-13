@@ -25,7 +25,10 @@ from deployment.remote import Remote
 
 
 class ConfigurationTests(unittest.TestCase):
+    """Exercise inventory loading, deployment variables, and template rendering."""
+
     def test_all_existing_inventories_and_role_selection(self):
+        """Check repository inventories and role-based host selection."""
         counts = {
             "dr": 6,
             "lst": 1,
@@ -54,6 +57,7 @@ class ConfigurationTests(unittest.TestCase):
             select_hosts(hosts, "app")
 
     def test_jenkins_aliases_nested_application_and_second_artifact(self):
+        """Verify legacy environment aliases and versioned application paths."""
         values = variables(
             "qa",
             "oba/oba-api",
@@ -74,6 +78,7 @@ class ConfigurationTests(unittest.TestCase):
             variables("qa", "app", "latest", True, {}, environ={})
 
     def test_unsafe_parameters_and_boolean_typos_fail(self):
+        """Reject unsafe paths and malformed boolean values."""
         for application in (
             "../app",
             "/app",
@@ -87,6 +92,7 @@ class ConfigurationTests(unittest.TestCase):
             boolean("flase")
 
     def test_render_is_literal_and_missing_secrets_are_not_defaulted(self):
+        """Ensure replacement is single-pass and missing variables remain errors."""
         self.assertEqual(
             render("db=[[password]]", {"password": "x[[evil]]"}), "db=x[[evil]]"
         )
@@ -94,6 +100,7 @@ class ConfigurationTests(unittest.TestCase):
             render("[[password]]", {})
 
     def test_actual_qa_configuration_and_shared_fallback(self):
+        """Render real QA configuration with defaults and a supplied secret."""
         settings, _ = environment("qa")
         values = variables(
             "qa",
@@ -113,6 +120,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn(b"[[", b"".join(files.values()))
 
     def test_flattened_config_collisions_fail(self):
+        """Reject configuration files that collide after directory flattening."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "files" / "qa" / "app"
@@ -124,7 +132,10 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class ArtifactTests(unittest.TestCase):
+    """Exercise artifact resolution, transport, and checksum validation."""
+
     def test_real_http_artifact_resolution_and_verified_download(self):
+        """Resolve and download a local test artifact while verifying its digest."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             version = root / "app" / "1.0"
@@ -134,7 +145,10 @@ class ArtifactTests(unittest.TestCase):
             (version / "app-1.0-sources.jar").write_bytes(b"sources")
 
             class Handler(SimpleHTTPRequestHandler):
+                """Serve the temporary repository without emitting request logs."""
+
                 def log_message(self, *args):
+                    """Suppress routine HTTP server request logging."""
                     pass
 
             server = ThreadingHTTPServer(
@@ -165,6 +179,7 @@ class ArtifactTests(unittest.TestCase):
                 worker.join(timeout=5)
 
     def test_snapshot_resolution_ignores_classifiers_and_external_links(self):
+        """Select the snapshot artifact while ignoring classifiers and unsafe links."""
         repo = Repository()
         repo.open = MagicMock(
             return_value=io.BytesIO(b"""
@@ -182,6 +197,7 @@ class ArtifactTests(unittest.TestCase):
     def test_latest_uses_maven_metadata_and_existing_version_path_is_not_duplicated(
         self,
     ):
+        """Resolve latest via Maven metadata and avoid repeating a version path."""
         repo = Repository()
         repo.open = MagicMock(
             side_effect=[
@@ -200,6 +216,7 @@ class ArtifactTests(unittest.TestCase):
         repo.open.assert_called_once_with("https://repo/base/app/2.0/")
 
     def test_ambiguous_artifacts_fail_instead_of_guessing(self):
+        """Require a unique artifact rather than guessing between candidates."""
         repo = Repository()
         repo.open = MagicMock(
             return_value=io.BytesIO(b'<a href="a.jar">a</a><a href="b.jar">b</a>')
@@ -208,6 +225,7 @@ class ArtifactTests(unittest.TestCase):
             repo.resolve("https://repo", "app", "1", ".jar")
 
     def test_download_checksum(self):
+        """Reject a downloaded artifact whose digest differs from the expected value."""
         repo = Repository()
         repo.open = MagicMock(return_value=io.BytesIO(b"artifact"))
         with (
@@ -217,6 +235,7 @@ class ArtifactTests(unittest.TestCase):
             repo.download("https://repo/app.jar", Path(directory) / "app.jar", "bad")
 
     def test_artifacts_are_resolved_as_jars(self):
+        """Build a bundle from the resolved JAR and preserve its URL and digest."""
         with tempfile.TemporaryDirectory() as directory:
             args = cli.parser().parse_args(
                 [
@@ -235,6 +254,7 @@ class ArtifactTests(unittest.TestCase):
             repo.resolve = MagicMock(return_value="https://repo/service.jar")
 
             def download(url, destination, checksum=None):
+                """Write fake artifact bytes and return a deterministic digest."""
                 destination.write_bytes(b"jar")
                 return "digest"
 
@@ -262,6 +282,7 @@ class ArtifactTests(unittest.TestCase):
             )
 
     def test_non_jar_artifact_urls_are_rejected(self):
+        """Reject artifact URLs that do not identify JAR files."""
         args = cli.parser().parse_args(
             [
                 "deploy",
@@ -289,7 +310,10 @@ class ArtifactTests(unittest.TestCase):
 
 
 class RemoteTests(unittest.TestCase):
+    """Verify remote release preparation, activation, restoration, and health checks."""
+
     def setUp(self):
+        """Create a mocked remote with representative QA deployment settings."""
         settings, _ = environment("qa")
         self.values = variables(
             "qa", "authentication-service", "1", False, settings, environ={}
@@ -302,6 +326,7 @@ class RemoteTests(unittest.TestCase):
         self.release = self.values["deploy_to"] + "/releases/20260101000000-abc"
 
     def test_prepare_records_state_before_activation_and_renders_service(self):
+        """Stage a release and record rollback state before activation."""
         with tempfile.TemporaryDirectory() as directory:
             bundle = Path(directory)
             (bundle / "config").mkdir()
@@ -321,6 +346,7 @@ class RemoteTests(unittest.TestCase):
         )
 
     def test_activate_switches_then_restarts_and_checks_health(self):
+        """Switch to the release before restarting and checking the service."""
         self.remote.load_state = MagicMock(return_value={"shared_existed": {}})
         self.remote.switch = MagicMock()
         self.remote.lifecycle = MagicMock()
@@ -331,6 +357,7 @@ class RemoteTests(unittest.TestCase):
         self.remote.healthy.assert_called_once()
 
     def test_restore_reinstalls_previous_service_and_release(self):
+        """Restore the prior service file and release after a failed deployment."""
         previous = self.values["deploy_to"] + "/releases/previous"
         self.remote.switch = MagicMock()
         self.remote.lifecycle = MagicMock()
@@ -353,6 +380,7 @@ class RemoteTests(unittest.TestCase):
         )
 
     def test_shared_content_is_backed_up_and_restored(self):
+        """Back up existing shared content and restore it during rollback."""
         self.remote.exists.return_value = True
         with tempfile.TemporaryDirectory() as directory:
             state = self.remote.prepare(
@@ -373,6 +401,7 @@ class RemoteTests(unittest.TestCase):
         )
 
     def test_first_deployment_restore_removes_new_service_and_current(self):
+        """Remove service and current-link state when rolling back the first release."""
         self.remote.exists.return_value = True
         self.remote.lifecycle = MagicMock()
         self.remote.restore(
@@ -388,6 +417,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("rm -f " + self.values["deploy_to"] + "/current", commands)
 
     def test_http_readiness_checks_successful_status_not_just_curl_exit(self):
+        """Require a successful HTTP status code in addition to curl success."""
         self.remote.health_url = "http://localhost:8080/health"
         self.remote.run.side_effect = [
             SimpleNamespace(ok=True, stdout="app RUNNING"),
@@ -399,6 +429,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("--max-time 5", command)
 
     def test_health_failure_is_not_reported_as_success(self):
+        """Fail after the bounded readiness retry window is exhausted."""
         self.remote.run.return_value = SimpleNamespace(ok=False, stdout="app FATAL")
         with (
             patch("deployment.remote.time.sleep"),
@@ -408,6 +439,7 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(self.remote.run.call_count, 12)
 
     def test_paths_outside_releases_cannot_be_pruned_or_rolled_back(self):
+        """Reject release paths outside the application's direct release directory."""
         for path in (
             "/etc",
             self.values["deploy_to"] + "/releases/../shared",
@@ -417,6 +449,7 @@ class RemoteTests(unittest.TestCase):
                 self.remote.validate_release(path)
 
     def test_stop_supervisor_is_idempotent_only_for_known_stopped_states(self):
+        """Skip stop only for known stopped states and issue it for running services."""
         self.remote.run.return_value = SimpleNamespace(ok=False, stdout="app STOPPED")
         self.remote.lifecycle("stop")
         self.assertEqual(self.remote.run.call_count, 1)
@@ -427,7 +460,10 @@ class RemoteTests(unittest.TestCase):
 
 
 class OrchestrationTests(unittest.TestCase):
+    """Verify command planning and multi-host deployment failure handling."""
+
     def args(self, action="deploy"):
+        """Build standard QA CLI arguments for an orchestration action."""
         return cli.parser().parse_args(
             [
                 action,
@@ -443,6 +479,7 @@ class OrchestrationTests(unittest.TestCase):
         )
 
     def test_offline_plan_never_opens_ssh_and_does_not_print_variables(self):
+        """Keep planning offline and omit the full deployment variable set."""
         with (
             patch("deployment.remote.Remote") as remote,
             redirect_stdout(io.StringIO()) as output,
@@ -456,6 +493,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertNotIn("variables", plan)
 
     def test_release_type_is_inferred_from_snapshot_suffix(self):
+        """Infer the snapshot release channel from the version suffix."""
         args = self.args("plan")
         args.version = "1.0.0-SNAPSHOT"
         with redirect_stdout(io.StringIO()) as output:
@@ -463,12 +501,14 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["release_type"], "snapshot")
 
     def test_release_type_override_cannot_conflict_with_version(self):
+        """Reject an explicit release channel that conflicts with the version."""
         args = self.args("plan")
         args.release_type = "snapshot"
         with self.assertRaisesRegex(ValueError, "is stable"):
             cli.execute(args)
 
     def test_host_failure_restores_failed_and_previously_activated_hosts(self):
+        """Roll back every activated host when a later host fails activation."""
         first, second = MagicMock(), MagicMock()
         second.activate.side_effect = RuntimeError("startup failed")
         events = []
@@ -486,6 +526,7 @@ class OrchestrationTests(unittest.TestCase):
         ):
 
             def bundle(args, values, workspace):
+                """Create a minimal fake bundle for the orchestration test."""
                 path = workspace / "bundle"
                 path.mkdir()
                 return path, {}
@@ -499,6 +540,7 @@ class OrchestrationTests(unittest.TestCase):
         first.cleanup.assert_not_called()
 
     def test_lock_failure_publishes_nothing_and_releases_acquired_locks(self):
+        """Avoid publishing on lock failure and release earlier acquired locks."""
         first, second = MagicMock(), MagicMock()
         second.lock.side_effect = RuntimeError("locked")
         with (
@@ -515,6 +557,7 @@ class OrchestrationTests(unittest.TestCase):
         first.close.assert_called_once()
 
     def test_retention_failure_does_not_undo_successful_deployment(self):
+        """Keep a healthy published release active if pruning later fails."""
         first, second = MagicMock(), MagicMock()
         first.cleanup.side_effect = RuntimeError("prune failed")
         with (
@@ -526,6 +569,7 @@ class OrchestrationTests(unittest.TestCase):
         ):
 
             def bundle(args, values, workspace):
+                """Create a minimal fake bundle for the orchestration test."""
                 path = workspace / "bundle"
                 path.mkdir()
                 return path, {}

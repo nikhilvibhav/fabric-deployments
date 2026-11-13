@@ -7,12 +7,16 @@ from deployment.config import ROOT, config_files, render, render_file
 
 
 def write(path, data):
+    """Create parent directories and write bytes to a test fixture path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
 
 
 class TemplateTests(unittest.TestCase):
+    """Test safe placeholder rendering and configuration file selection."""
+
     def test_placeholders_are_single_pass_and_preserve_runtime_syntax(self):
+        """Substitute only deployment placeholders and preserve runtime syntax."""
         text = "a=[[x]] b={{camel}} c=${spring} d=[[:alpha:]] e=[[ -f f ]]"
         self.assertEqual(
             render(text, {"x": "[[y]]"}),
@@ -22,6 +26,7 @@ class TemplateTests(unittest.TestCase):
             render("[[x]]", {})
 
     def test_render_file_preserves_raw_bytes_and_rejects_obsolete_suffix(self):
+        """Preserve binary files and reject obsolete ERB-style template suffixes."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "a.properties"
@@ -36,6 +41,7 @@ class TemplateTests(unittest.TestCase):
                 config_files("qa", "app", {}, root)
 
     def test_service_configuration_includes_xml_and_renders_placeholders(self):
+        """Render selected properties and XML configuration files."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "files" / "qa" / "app"
@@ -48,6 +54,7 @@ class TemplateTests(unittest.TestCase):
             self.assertEqual(files["logging.xml"], b"<host>h</host>")
 
     def test_all_repository_configuration_and_service_templates_render(self):
+        """Check repository templates for unresolved deployment placeholders."""
         values = {}
         for path in (ROOT / "files").rglob("*"):
             if path.is_file():

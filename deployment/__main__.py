@@ -26,6 +26,7 @@ DEFAULT_REPOSITORY = "http://10.90.135.56:8081/artifactory/simple"
 
 
 def release_type_for_version(version, requested=None):
+    """Infer a release channel from the version and reject conflicting overrides."""
     inferred = "snapshot" if version.endswith("-SNAPSHOT") else "stable"
     if requested is not None and requested != inferred:
         raise ValueError(
@@ -36,6 +37,7 @@ def release_type_for_version(version, requested=None):
 
 
 def parser():
+    """Build the argument parser for deployment and lifecycle commands."""
     result = argparse.ArgumentParser(description="Fabric deployment CLI")
     result.add_argument(
         "action", choices=("plan", "deploy", "rollback", "start", "stop")
@@ -70,6 +72,7 @@ def parser():
 
 
 def prepare_bundle(args, values, workspace):
+    """Download and verify the application artifact into a release bundle."""
     bundle = workspace / "bundle"
     bundle.mkdir()
     repository = Repository()
@@ -100,6 +103,7 @@ def prepare_bundle(args, values, workspace):
 
 
 def execute(args):
+    """Validate inputs, then plan or carry out the requested remote operation."""
     args.release_type = release_type_for_version(args.version, args.release_type)
     settings, hosts = environment(args.stage)
     selected = select_hosts(hosts, args.roles)
@@ -259,6 +263,7 @@ def execute(args):
 
 
 def main(argv=None):
+    """Dispatch the CLI command and convert expected failures to exit statuses."""
     argv = sys.argv[1:] if argv is None else argv
     commands = {"secrets": secrets_cli.run}
     if argv[:1] and argv[0] in commands:

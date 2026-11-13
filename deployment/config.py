@@ -38,12 +38,14 @@ SECRET_KEYS = {"jdbc_database_password", "mongodb_password", "big_username"}
 
 
 def boolean(value):
+    """Parse a strict true/false option value."""
     if str(value).lower() not in {"true", "false"}:
         raise ValueError("Boolean parameters must be true or false")
     return str(value).lower() == "true"
 
 
 def relative_path(value, label):
+    """Validate and return a safe slash-separated relative path."""
     if not value or any(
         not SEGMENT.fullmatch(part) or part in {".", ".."} for part in value.split("/")
     ):
@@ -55,11 +57,14 @@ def relative_path(value, label):
 
 @dataclass(frozen=True)
 class Host:
+    """An inventory host and the deployment roles assigned to it."""
+
     address: str
     roles: tuple[str, ...]
 
 
 def environment(stage, root=ROOT):
+    """Load and validate stage settings and host inventory."""
     if not SEGMENT.fullmatch(stage) or stage in {".", ".."}:
         raise ValueError("Invalid stage")
     path = root / "deployment" / "inventories" / f"{stage}.json"
@@ -107,6 +112,7 @@ def environment(stage, root=ROOT):
 
 
 def select_hosts(hosts, roles):
+    """Return addresses for hosts matching the requested comma-separated roles."""
     wanted = set(roles.split(","))
     known = {role for host in hosts for role in host.roles}
     if not wanted or not wanted <= known:
@@ -124,6 +130,7 @@ def variables(
     environ=None,
     secret_values=None,
 ):
+    """Merge defaults, file, environment, and secret values into deployment variables."""
     environ = os.environ if environ is None else environ
     values = dict(DEFAULTS)
     values.update({key: settings[key] for key in ("gelf_host",) if key in settings})
@@ -179,7 +186,9 @@ def variables(
 
 
 def render(text, values):
+    """Substitute deployment placeholders once, failing for missing values."""
     def replace(match):
+        """Resolve one placeholder from the supplied variable mapping."""
         key = match.group(1)
         if key not in values:
             raise ValueError(f"Missing template variable: {key}")
@@ -189,6 +198,7 @@ def render(text, values):
 
 
 def utf8(data, path):
+    """Decode renderable template bytes as UTF-8 with a path-aware error."""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -198,6 +208,7 @@ def utf8(data, path):
 
 
 def render_file(path, values):
+    """Render a template file while preserving untouched files byte-for-byte."""
     data = path.read_bytes()
     if not PLACEHOLDER_BYTES.search(data):
         return data
@@ -205,6 +216,7 @@ def render_file(path, values):
 
 
 def config_files(stage, application, values, root=ROOT):
+    """Collect, flatten, and render configuration files for an application."""
     source = root / "files" / stage / application
     if not source.is_dir():
         raise ValueError(f"Configuration directory is missing: {stage}/{application}")
@@ -230,13 +242,16 @@ class _Recorder(dict):
     """Renders every placeholder as empty while recording its name."""
 
     def __init__(self):
+        """Initialize an empty variable-name recorder."""
         super().__init__()
         self.names = set()
 
     def __contains__(self, key):
+        """Treat every name as available so rendering can enumerate placeholders."""
         return True
 
     def __getitem__(self, key):
+        """Record a requested placeholder and return its blank replacement."""
         self.names.add(key)
         return ""
 
@@ -249,5 +264,6 @@ def template_names(stage, application, root=ROOT):
 
 
 def shared_files(stage, application, root=ROOT):
+    """Read application-level shared files that must persist across releases."""
     source = root / "files" / stage / application
     return {path.stem: path.read_bytes() for path in sorted(source.glob("*.shared"))}

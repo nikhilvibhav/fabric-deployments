@@ -13,16 +13,21 @@ from deployment.config import variables
 
 
 class SecretStoreTests(unittest.TestCase):
+    """Test encrypted secret storage, key management, and secret CLI operations."""
+
     def setUp(self):
+        """Create an isolated QA secret store and generate its key pair."""
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.key = self.root / "qa.private.key"
         secrets.keygen("qa", self.key, self.root)
 
     def tearDown(self):
+        """Remove the temporary secret store and key files."""
         self.directory.cleanup()
 
     def store(self, application, name, value, stage="qa"):
+        """Encrypt and persist one test secret for an application."""
         sealed = secrets.read_store(stage, application, self.root)
         sealed[name] = secrets.seal(
             secrets.load_public_key(stage, self.root), stage, application, name, value
@@ -30,6 +35,7 @@ class SecretStoreTests(unittest.TestCase):
         secrets.write_store(stage, application, sealed, self.root)
 
     def test_round_trip_keeps_names_readable_and_values_encrypted(self):
+        """Keep secret names visible while encrypting values that decrypt correctly."""
         self.store("oba/oba-api", "jdbc_database_password", "p@ss=word\n")
         path = self.root / "secrets" / "qa" / "oba" / "oba-api.json"
         self.assertIn("jdbc_database_password", path.read_text())
@@ -40,6 +46,7 @@ class SecretStoreTests(unittest.TestCase):
         )
 
     def test_contributor_can_add_values_without_private_key(self):
+        """Allow contributors to add encrypted values using only the public key."""
         self.store("app", "first", "one")
         self.store("app", "second", "two")
         self.assertEqual(
@@ -48,6 +55,7 @@ class SecretStoreTests(unittest.TestCase):
         )
 
     def test_another_stage_key_is_rejected(self):
+        """Reject a private key that belongs to a different stage."""
         production_key = self.root / "production.private.key"
         secrets.keygen("production", production_key, self.root)
         self.store("app", "password", "value")
@@ -55,6 +63,7 @@ class SecretStoreTests(unittest.TestCase):
             secrets.decrypt_all("qa", "app", production_key, self.root)
 
     def test_ciphertext_cannot_be_moved_between_applications_or_names(self):
+        """Reject ciphertext copied to a different application or secret name."""
         self.store("first", "password", "value")
         ciphertext = secrets.read_store("qa", "first", self.root)["password"]
         secrets.write_store("qa", "second", {"password": ciphertext}, self.root)
@@ -69,17 +78,20 @@ class SecretStoreTests(unittest.TestCase):
                 secrets.decrypt_all("qa", application, self.key, self.root)
 
     def test_missing_key_fails_when_secrets_exist(self):
+        """Allow empty stores without a key but require one for encrypted values."""
         self.assertEqual(secrets.decrypt_all("qa", "app", None, self.root), {})
         self.store("app", "password", "value")
         with self.assertRaisesRegex(ValueError, "supply --secrets-key"):
             secrets.decrypt_all("qa", "app", None, self.root)
 
     def test_reserved_and_invalid_names_are_rejected(self):
+        """Reject malformed secret names and names reserved for deployment values."""
         for name in ("jvm_options", "java_bin", "deploy_to", "bad-name", "1st"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 secrets.validate_name(name)
 
     def test_existing_keys_are_never_overwritten(self):
+        """Ensure key generation never replaces an existing stage or key file."""
         with self.assertRaisesRegex(ValueError, "already has a key"):
             secrets.keygen("qa", self.root / "new.key", self.root)
         secrets.keygen("qe", self.root / "qe.key", self.root)
@@ -87,6 +99,7 @@ class SecretStoreTests(unittest.TestCase):
             secrets.keygen("qt", self.root / "qe.key", self.root)
 
     def test_rekey_preserves_values_and_retires_old_key(self):
+        """Re-encrypt all stage values with a new key and reject the retired key."""
         self.store("app", "password", "value")
         self.store("oba/oba-api", "token", "abc")
         new_key = self.root / "qa-new.private.key"
@@ -100,11 +113,13 @@ class SecretStoreTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX permission check")
     def test_group_readable_private_key_is_rejected(self):
+        """Reject private keys readable by group or other POSIX users."""
         self.key.chmod(0o640)
         with self.assertRaisesRegex(ValueError, "chmod 600"):
             secrets.load_private_key(self.key, "qa", self.root)
 
     def test_cli_set_reads_value_from_stdin_and_list_shows_names_only(self):
+        """Read a secret from standard input and list only its name afterward."""
         with (
             patch("sys.stdin", io.StringIO("top-secret\n")),
             redirect_stdout(io.StringIO()),
@@ -136,7 +151,10 @@ class SecretStoreTests(unittest.TestCase):
 
 
 class CheckAndVerifyTests(unittest.TestCase):
+    """Test keyless store validation and private-key secret verification."""
+
     def setUp(self):
+        """Create an isolated QA store and fallback configuration templates."""
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.key = self.root / "qa.private.key"
@@ -145,19 +163,23 @@ class CheckAndVerifyTests(unittest.TestCase):
             self.write(Path("files") / name, "fallback\n")
 
     def tearDown(self):
+        """Remove the temporary test directory."""
         self.directory.cleanup()
 
     store = SecretStoreTests.store
 
     def write(self, relative, text):
+        """Write text beneath the temporary repository root."""
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
     def config(self, text, application="app"):
+        """Write an application-specific QA properties template."""
         self.write(Path("files") / "qa" / application / "env.properties", text)
 
     def verify(self, *extra):
+        """Run the verify command and return its standard output."""
         argv = ["verify", "--stage", "qa", "--application", "app"]
         argv += ["--secrets-key", str(self.key), *extra]
         with redirect_stdout(io.StringIO()) as output:
@@ -165,22 +187,26 @@ class CheckAndVerifyTests(unittest.TestCase):
         return output.getvalue()
 
     def test_referenced_well_formed_secret_passes(self):
+        """Accept a valid encrypted secret referenced by an application template."""
         self.config("db.password=[[db_password]]\n")
         self.store("app", "db_password", "value")
         self.assertEqual(secrets.check(root=self.root), ([], []))
 
     def test_unused_or_misnamed_secret_is_an_error(self):
+        """Report encrypted values whose names are absent from templates."""
         self.config("db.password=[[db_password]]\n")
         self.store("app", "db_pasword", "value")
         errors, _ = secrets.check(root=self.root)
         self.assertTrue(any("db_pasword is not used" in e for e in errors), errors)
 
     def test_secret_for_unknown_application_is_an_error(self):
+        """Report stores whose application configuration directory is missing."""
         self.store("missing-app", "db_password", "value")
         errors, _ = secrets.check(root=self.root)
         self.assertTrue(any("Configuration directory is missing" in e for e in errors))
 
     def test_malformed_or_truncated_ciphertext_is_an_error(self):
+        """Report malformed base64 and ciphertext too short to be a sealed value."""
         self.config("a=[[first]]\nb=[[second]]\n")
         secrets.write_store(
             "qa", "app", {"first": "not base64!", "second": "AAAA"}, self.root
@@ -190,11 +216,13 @@ class CheckAndVerifyTests(unittest.TestCase):
         self.assertTrue(any("second is not a sealed value" in e for e in errors))
 
     def test_store_without_public_key_is_an_error(self):
+        """Report a stage store that has no corresponding public key."""
         self.write(Path("secrets") / "qe" / "app.json", '{"version": 1, "values": {}}')
         errors, _ = secrets.check("qe", root=self.root)
         self.assertTrue(any("No public key for stage qe" in e for e in errors))
 
     def test_plaintext_and_environment_placeholders_are_warnings(self):
+        """Warn about literal sensitive properties and unmanaged placeholders."""
         self.config(
             "db.password=[[db_password]]\n"
             "admin.password=hunter2\n"
@@ -210,6 +238,7 @@ class CheckAndVerifyTests(unittest.TestCase):
         self.assertIn("[[jdbc_database_password]] is not an encrypted", warnings[0])
 
     def test_cli_check_fails_on_errors(self):
+        """Print validation errors and fail the check command when errors exist."""
         self.store("missing-app", "db_password", "value")
         with (
             redirect_stdout(io.StringIO()) as output,
@@ -219,16 +248,19 @@ class CheckAndVerifyTests(unittest.TestCase):
         self.assertIn("ERROR qa/missing-app", output.getvalue())
 
     def test_repository_secrets_have_no_errors(self):
+        """Ensure committed repository secret stores pass validation."""
         errors, _ = secrets.check()
         self.assertEqual(errors, [])
 
     def test_verify_prints_names_never_values(self):
+        """Confirm successful verification reports names without exposing values."""
         self.store("app", "db_password", "top-secret")
         output = self.verify()
         self.assertIn("db_password: decrypted", output)
         self.assertNotIn("top-secret", output)
 
     def test_verify_compare_reports_match_without_printing_value(self):
+        """Compare a secret interactively without printing its contents."""
         self.store("app", "db_password", "top-secret")
         with (
             patch("sys.stdin", MagicMock(isatty=lambda: True)),
@@ -245,6 +277,7 @@ class CheckAndVerifyTests(unittest.TestCase):
             self.verify("--name", "db_password", "--compare")
 
     def test_verify_compare_requires_terminal_and_name(self):
+        """Require a secret name and interactive terminal for compare mode."""
         self.store("app", "db_password", "top-secret")
         with self.assertRaisesRegex(ValueError, "requires --name"):
             self.verify("--compare")
@@ -256,7 +289,10 @@ class CheckAndVerifyTests(unittest.TestCase):
 
 
 class DeploymentIntegrationTests(unittest.TestCase):
+    """Test interactions between encrypted secrets and deployment orchestration."""
+
     def test_environment_variable_conflicting_with_secret_fails(self):
+        """Reject ambiguous values supplied both as secrets and environment vars."""
         with self.assertRaisesRegex(ValueError, "both as an encrypted secret"):
             variables(
                 "qa",
@@ -269,6 +305,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
             )
 
     def args(self, action, key=None):
+        """Build standard QA CLI arguments for deployment integration tests."""
         argv = [
             action,
             "--stage",
@@ -283,6 +320,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
         return cli.parser().parse_args(argv + (["--secrets-key", key] if key else []))
 
     def test_plan_without_key_lists_names_and_never_decrypts(self):
+        """Plan without a key by listing secret names without decrypting them."""
         with (
             patch.dict(os.environ, {secrets.KEY_ENV: ""}),
             patch.object(
@@ -299,6 +337,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
         )
 
     def test_deploy_without_key_fails_before_connecting(self):
+        """Require a decryption key before creating any remote connection."""
         with (
             patch.object(cli, "read_store", return_value={"password": "x"}),
             patch.object(secrets, "read_store", return_value={"password": "x"}),
@@ -310,10 +349,12 @@ class DeploymentIntegrationTests(unittest.TestCase):
         remote.assert_not_called()
 
     def test_decrypted_secret_is_rendered_into_uploaded_configuration(self):
+        """Render a decrypted value into configuration before remote preparation."""
         captured = {}
         remote = MagicMock()
 
         def prepare(bundle, release, metadata, shared):
+            """Capture generated configuration files passed to the remote."""
             captured.update(
                 {path.name: path.read_text() for path in (bundle / "config").iterdir()}
             )
@@ -321,6 +362,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
         remote.prepare.side_effect = prepare
 
         def bundle(args, values, workspace):
+            """Create the minimal bundle needed by the integration test."""
             path = workspace / "bundle"
             path.mkdir()
             return path, {}
