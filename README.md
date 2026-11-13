@@ -28,7 +28,6 @@ This Python CLI deploys JAR artifacts from Artifactory to existing hosts over SS
   - [Create and manage secrets](#create-and-manage-secrets)
   - [Check and verify secrets](#check-and-verify-secrets)
   - [Rekey a stage](#rekey-a-stage)
-  - [Prune old generations](#prune-old-generations)
   - [Key handling and recovery](#key-handling-and-recovery)
 - [Deployment behavior and recovery](#deployment-behavior-and-recovery)
 - [Contribute and verify](#contribute-and-verify)
@@ -223,16 +222,16 @@ python -m deployment deploy \
 
 Secrets are stored in Git encrypted per environment using libsodium sealed boxes via PyNaCl. No Vault, Jenkins credentials, or other service is required.
 
-- `secrets/STAGE/CURRENT` selects the active generation. New stages get this file from `keygen`; existing legacy stages without it continue using the old layout until their first rekey.
-- `secrets/STAGE/.generations/GENERATION/` contains that generation's `public.key` and application JSON stores. The committed public key encrypts values; anyone can add or rotate a value with it but cannot read existing values.
+- `secrets/STAGE/public.key` encrypts values. It is committed; anyone can add or rotate a value with it but cannot read existing values.
 - The stage's **private key** decrypts. Keep it outside Git on the deployment controller/operator system and supply it with `--secrets-key PATH` or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key; a QA key cannot decrypt production secrets, and a mismatched key is rejected.
-- Each application JSON store holds one sealed value per name. Names remain readable for review; values do not. Each value is bound to its stage, application, and name, so ciphertext cannot be copied elsewhere. `set` and `unset` modify stores in the active generation.
+- `secrets/STAGE/APPLICATION.json` holds one sealed value per name. Names remain readable for review; values do not. Each value is bound to its stage, application, and name, so ciphertext cannot be copied elsewhere.
+- Each store also records a `key_id`, a fingerprint of the public key that sealed its values. A store whose `key_id` doesn't match `public.key` is refused by `set`, `unset` and deploys, and reported by `check`.
 
 Secret names are existing template variables, such as `jdbc_database_password`, `mongodb_password`, or any `[[name]]` used by an application's templates. Values are decrypted in memory and rendered only into release `config/` files. Names that would end up in service definitions, process arguments, or paths—including `jvm_options`, `java_bin`, and `deploy_to`—are refused.
 
 ### Create and manage secrets
 
-Create the first generation for a stage. Commit `CURRENT` and the generation directory; keep the private key secure and outside the repository:
+Create a key pair for a new stage. Commit `secrets/STAGE/public.key`; keep the private key secure and outside the repository:
 
 ```sh
 python -m deployment secrets keygen \
@@ -266,7 +265,7 @@ python -m deployment secrets unset \
 
 Developers with only the public key can run `check` without decrypting secrets. It reports:
 
-- **Errors:** malformed or truncated ciphertext; a secret name with no matching `[[name]]` placeholder; secrets for an application with no configuration directory; or a stage without `public.key`.
+- **Errors:** malformed or truncated ciphertext; a store encrypted with a different key than `public.key`; a secret name with no matching `[[name]]` placeholder; secrets for an application with no configuration directory; or a stage without `public.key`.
 - **Warnings:** placeholders without encrypted values that must come from the environment or `--vars-file`; or sensitive-looking properties (password, secret, token, API key) that still contain plaintext in an application that uses encrypted secrets.
 
 Run checks for all stages, or narrow them to a stage and application:
@@ -310,7 +309,11 @@ python -m deployment secrets rekey \
   --private-key-out /secure/qa-2026-11.private.key
 ```
 
-Rekey decrypts every active application store before writing anything. It builds and verifies a new generation, then atomically updates `CURRENT` to activate it. If the command fails before that switch, the old generation remains active; inspect any newly written private key or incomplete temporary generation.
+Rekey decrypts, re-encrypts and verifies every application store in memory before writing anything. It then writes the new private key, rewrites every store, and replaces `public.key` last. If it is interrupted while writing, `check` reports the stores whose `key_id` no longer matches `public.key`. Restore the previous state with Git, delete the new private key, and run rekey again:
+
+```sh
+git checkout -- secrets/qa
+```
 
 Verify the new key against each application before relying on it:
 
@@ -323,33 +326,22 @@ python -m deployment secrets verify \
 python -m deployment secrets check --stage qa
 ```
 
-After verification, commit `CURRENT` and the generation it names together. Never commit the private key:
+After verification, commit every change under the stage directory together. Never commit the private key:
 
 ```sh
-generation=$(cat secrets/qa/CURRENT)
-git add secrets/qa/CURRENT "secrets/qa/.generations/$generation"
+git add secrets/qa
 git diff --cached --stat
 ```
 
-Keep the old private key securely if you may need to restore its generation. If the old key was exposed, rotate the actual secret values too; rekeying alone does not invalidate leaked credentials.
+Rekey changes every store's `key_id`, so a branch that changed secrets for the same stage will get a merge conflict instead of silently losing its change. To resolve it, take the rekeyed files (`git checkout --theirs secrets/qa` when merging `main` into your branch) and repeat your `secrets set` or `unset` commands on top.
 
-### Prune old generations
-
-Prune generations separately from rekeying. `--keep` counts the current generation. By default, the command only previews what it would delete; add `--yes` to delete those generation directories:
-
-```sh
-python -m deployment secrets prune --stage qa --keep 3
-python -m deployment secrets prune --stage qa --keep 3 --yes
-```
-
-Pruning follows the generation `parent` history and leaves incomplete or unlinked generations untouched. Keep corresponding private keys outside Git for any old generation you may need to restore. Pruning removes files from the working tree; it does not remove their ciphertext from Git history.
+Keep the old private key securely if you may need to decrypt older commits. If the old key was exposed, rotate the actual secret values too; rekeying alone does not invalidate leaked credentials.
 
 ### Key handling and recovery
 
 - Store private keys with mode `0600` (enforced on Linux), owned by the deploy account, on the controller only. Keep an offline backup for each stage; losing a key means re-entering every secret for that stage.
 - Never commit private keys. `.gitignore` excludes `*.private.key` and any `*.key` under `secrets/` except `public.key`; check before committing.
-- Do not run `set`, `unset`, `rekey`, or `prune` concurrently for the same stage.
-- When rekeying a legacy-layout stage, its old root-level files remain inactive after the switch; `CURRENT` determines the active files.
+- Do not run `set`, `unset`, or `rekey` concurrently for the same stage in the same checkout.
 - If a private key leaks, rekeying alone is not enough: **rotate the actual secret values** (database passwords, etc.) too.
 - Revoking someone’s ability to add secrets is not needed because encryption can be done with the public key. If someone who held a private key must be revoked, rekey and rotate the values.
 

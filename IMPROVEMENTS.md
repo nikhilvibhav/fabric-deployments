@@ -53,12 +53,14 @@ than the Python logic.
    How serious this is depends on whether the internal network path is trusted.
 
 4. ✅ **Fixed: Rekey wasn't atomic** (MEDIUM, earlier review #4).
-   `rekey` (`deployment/secrets.py`) now builds and verifies all re-encrypted
-   stores in a new `.generations/<id>/` directory before activating it. It then
-   atomically replaces the small `CURRENT` pointer file; readers therefore use
-   either the previous complete generation or the new complete generation.
-   The previous generation is retained for recovery. Commit `CURRENT` and its
-   selected generation together.
+   `rekey` (`deployment/secrets.py`) now decrypts, re-encrypts and verifies
+   every store in memory before writing, and replaces `public.key` last.
+   Each store records a `key_id` (public-key fingerprint):
+   - An interrupted rekey leaves mismatched stores, which `check`, `set` and
+     deploys refuse; `git checkout -- secrets/<stage>` restores them.
+   - Rekey rewrites every store, so it conflicts in Git with any branch that
+     changed secrets. An earlier generation-directory design let such
+     changes be silently lost or reverted on merge.
 
 ## 🟠 CI/CD workflow (`.github/workflows/tests.yaml`)
 
@@ -130,7 +132,7 @@ the code on 2026-11-12.
 | 1 | 🟠 HIGH | 8/10 | Default Artifactory URL is HTTP and SHA-256 verification is optional, so a JAR could be replaced in transit. | ❌ Open: see [Security #3](#-security). |
 | 2 | 🟡 MEDIUM | 8/10 | `sterr_logfile_backups` misspelled in `files/camel_supervisord`, so Supervisor could reject the config and trigger a rollback. | ✅ Fixed: `files/camel_supervisord:19` now reads `stderr_logfile_backups`. |
 | 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed (previously marked ❌): `valid_url()` now rejects user info, queries and fragments (`deployment/artifacts.py:17`), and `--health-url` is validated with it (`deployment/__main__.py:127`). |
-| 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ❌ Open: see [Security #4](#-security). |
+| 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ✅ Fixed: see [Security #4](#-security). |
 | 5 | 🟡 MEDIUM | 8/10 | `[[pca_api_key]]` isn't among the environment keys, so rendering fails unless it's supplied via a vars file or an encrypted secret. | ✅ Resolved: all six QA apps that use it (`branch-finder-service`, `enquiry-office-api`, `inflight-redelivery-service`, `pfw-depot-finder`, `postoffice-lat-long-loader`, `tplms-finder-service`) have it encrypted. `secrets check` now warns about any placeholder with no encrypted value. It still can't be set as an environment variable, which is fine while it stays encrypted. |
 
 ## Suggested order
@@ -143,4 +145,4 @@ the code on 2026-11-12.
 4. Harden the workflow: permissions, SHA pins, pinned ruff, pip-audit,
    gitleaks, Dependabot.
 5. Add a hashed lockfile for the controller's dependencies.
-6. Make rekey atomic, then the remaining code and tooling items.
+6. ✅ Make rekey atomic (done); then the remaining code and tooling items.

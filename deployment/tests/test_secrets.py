@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -111,73 +113,86 @@ class SecretStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not belong"):
             secrets.decrypt_all("qa", "app", self.key, self.root)
 
-    def test_failed_rekey_activation_keeps_previous_generation_active(self):
-        """Keep the current generation readable when replacing CURRENT fails."""
+    def test_store_records_key_id_and_rekey_updates_it(self):
+        """Stamp each store with its key's id so a rekey changes every store."""
         self.store("app", "password", "value")
-        first_new_key = self.root / "qa-first-new.private.key"
-        secrets.rekey("qa", self.key, first_new_key, self.root)
+        path = secrets.secrets_path("qa", "app", self.root)
+        before = json.loads(path.read_text())["key_id"]
+        self.assertEqual(
+            before, secrets.key_id(secrets.load_public_key("qa", self.root))
+        )
+        secrets.rekey("qa", self.key, self.root / "qa-new.private.key", self.root)
+        after = json.loads(path.read_text())["key_id"]
+        self.assertEqual(
+            after, secrets.key_id(secrets.load_public_key("qa", self.root))
+        )
 
-        current = self.root / "secrets" / "qa" / "CURRENT"
-        previous_generation = current.read_text()
-        second_new_key = self.root / "qa-second-new.private.key"
+    def test_interrupted_rekey_is_detected_and_block_writes(self):
+        """A rekey that stops before public.key changes leaves a detectable state."""
+        self.store("app", "password", "value")
+        public_key = secrets.public_key_path("qa", self.root)
         write_atomic = secrets.write_atomic
 
-        def fail_pointer_replacement(path, text):
-            """Simulate failure while committing the new active generation."""
-            if Path(path) == current:
-                raise OSError("simulated pointer replacement failure")
+        def fail_on_public_key(path, text):
+            """Simulate an interruption just before the new public key is written."""
+            if Path(path) == public_key:
+                raise OSError("simulated interruption")
             write_atomic(path, text)
 
         with (
-            patch.object(secrets, "write_atomic", side_effect=fail_pointer_replacement),
-            self.assertRaisesRegex(OSError, "pointer replacement failure"),
+            patch.object(secrets, "write_atomic", side_effect=fail_on_public_key),
+            self.assertRaisesRegex(OSError, "simulated interruption"),
         ):
-            secrets.rekey("qa", first_new_key, second_new_key, self.root)
+            secrets.rekey("qa", self.key, self.root / "qa.new.private.key", self.root)
 
-        self.assertEqual(current.read_text(), previous_generation)
-        self.assertEqual(
-            secrets.decrypt_all("qa", "app", first_new_key, self.root),
-            {"password": "value"},
-        )
+        errors, _ = secrets.check("qa", "app", self.root)
+        self.assertTrue(any("different key than public.key" in e for e in errors))
+        with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
+            self.store("app", "other", "value")
+        with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
+            secrets.decrypt_all("qa", "app", self.key, self.root)
 
-    def test_prune_keeps_requested_active_history_and_defaults_to_dry_run(self):
-        """Preview old generations first and delete only beyond the keep count."""
+    def test_rekey_refuses_an_existing_private_key_path_before_changing_files(self):
+        """Fail before any work when the new private key path is already taken."""
         self.store("app", "password", "value")
-        keys = [self.key]
-        for number in range(1, 4):
-            new_key = self.root / f"qa-{number}.private.key"
-            secrets.rekey("qa", keys[-1], new_key, self.root)
-            keys.append(new_key)
 
-        generations_dir = self.root / "secrets" / "qa" / ".generations"
-        current = self.root / "secrets" / "qa" / "CURRENT"
-        before = {path.name for path in generations_dir.iterdir() if path.is_dir()}
-        self.assertEqual(len(before), 4)
-
-        with redirect_stdout(io.StringIO()) as output:
-            secrets.run(["prune", "--stage", "qa", "--keep", "2"], self.root)
-        self.assertIn("Dry run", output.getvalue())
+        before = secrets.secrets_path("qa", "app", self.root).read_text()
+        with self.assertRaises(FileExistsError):
+            secrets.rekey("qa", self.key, self.key, self.root)
         self.assertEqual(
-            {path.name for path in generations_dir.iterdir() if path.is_dir()}, before
+            secrets.secrets_path("qa", "app", self.root).read_text(), before
         )
 
-        with redirect_stdout(io.StringIO()) as output:
-            secrets.run(["prune", "--stage", "qa", "--keep", "2", "--yes"], self.root)
-        self.assertIn("Removed 2 generation(s)", output.getvalue())
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_rekey_conflicts_with_a_secret_changed_on_another_branch(self):
+        """A secret rotated on a branch must conflict with a rekey, not vanish."""
 
-        active = current.read_text().strip()
-        active_metadata = json.loads(
-            (generations_dir / active / "generation.meta").read_text()
-        )
-        remaining = {path.name for path in generations_dir.iterdir() if path.is_dir()}
-        self.assertEqual(
-            remaining,
-            {active, active_metadata["parent"]},
-        )
-        self.assertEqual(
-            secrets.decrypt_all("qa", "app", keys[-1], self.root),
-            {"password": "value"},
-        )
+        def git(*args):
+            """Run git in the temporary repository with a fixed identity."""
+            return subprocess.run(
+                ["git", "-c", "user.name=test", "-c", "user.email=test@example.com"]
+                + list(args),
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        git("init", "-q")
+        self.store("app", "password", "old")
+        git("add", "secrets")
+        git("commit", "-qm", "base")
+        git("switch", "-qc", "rotate")
+        self.store("app", "password", "new")
+        git("commit", "-qam", "rotate password")
+        git("switch", "-q", "-")
+        secrets.rekey("qa", self.key, self.root / "qa-new.private.key", self.root)
+        git("commit", "-qam", "rekey")
+
+        merge = git("merge", "--no-edit", "rotate")
+        self.assertNotEqual(merge.returncode, 0)
+        conflicted = git("diff", "--name-only", "--diff-filter=U").stdout
+        self.assertIn("secrets/qa/app.json", conflicted)
 
     @unittest.skipUnless(os.name == "posix", "POSIX permission check")
     def test_group_readable_private_key_is_rejected(self):
@@ -216,45 +231,6 @@ class SecretStoreTests(unittest.TestCase):
         self.assertNotIn(
             "top-secret",
             secrets.secrets_path("qa", "app", self.root).read_text(),
-        )
-
-    def test_keygen_and_set_store_files_in_the_initial_generation(self):
-        """Create CURRENT with keygen and have set write into its active generation."""
-        stage_root = self.root / "secrets" / "qa"
-        current = stage_root / "CURRENT"
-        self.assertTrue(current.is_file())
-
-        generation = current.read_text().strip()
-        data_dir = stage_root / ".generations" / generation
-        metadata = json.loads((data_dir / "generation.meta").read_text())
-        self.assertIsNone(metadata["parent"])
-        self.assertTrue((data_dir / "public.key").is_file())
-        self.assertFalse((stage_root / "public.key").exists())
-
-        with (
-            patch("sys.stdin", io.StringIO("top-secret\n")),
-            redirect_stdout(io.StringIO()),
-        ):
-            secrets.run(
-                [
-                    "set",
-                    "--stage",
-                    "qa",
-                    "--application",
-                    "app",
-                    "--name",
-                    "password",
-                    "--value-from",
-                    "-",
-                ],
-                self.root,
-            )
-
-        self.assertTrue((data_dir / "app.json").is_file())
-        self.assertFalse((stage_root / "app.json").exists())
-        self.assertEqual(
-            secrets.decrypt_all("qa", "app", self.key, self.root),
-            {"password": "top-secret"},
         )
 
 
@@ -448,7 +424,11 @@ class DeploymentIntegrationTests(unittest.TestCase):
         """Require a decryption key before creating any remote connection."""
         with (
             patch.object(cli, "read_store", return_value={"password": "x"}),
-            patch.object(secrets, "read_store", return_value={"password": "x"}),
+            patch.object(
+                secrets,
+                "read_store_file",
+                return_value={"version": 2, "key_id": "x", "values": {"password": "x"}},
+            ),
             patch("deployment.remote.Remote") as remote,
             self.assertRaisesRegex(ValueError, "supply --secrets-key"),
             patch("os.environ", {}),

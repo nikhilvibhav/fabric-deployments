@@ -8,15 +8,14 @@ Only the holder of the environment's private key can decrypt them.
 import argparse
 import base64
 import getpass
+import hashlib
 import hmac
 import json
 import os
 import re
-import shutil
 import stat
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 from nacl.bindings import crypto_box_SEALBYTES
@@ -25,9 +24,9 @@ from nacl.public import PrivateKey, PublicKey, SealedBox
 
 from .config import DEFAULTS, ROOT, SEGMENT, relative_path, template_names
 
-FORMAT_VERSION = 1
+# Version 2 added key_id, which records the key that sealed a store's values.
+FORMAT_VERSION = 2
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-GENERATION_ID = re.compile(r"[0-9a-f]{32}")
 KEY_ENV = "CAMEL_SECRETS_KEY_FILE"
 # Property keys whose literal values should be encrypted secrets instead.
 SENSITIVE_PROPERTY = re.compile(
@@ -55,39 +54,31 @@ def secrets_dir(stage, root=ROOT):
     return root / "secrets" / stage
 
 
-def active_data_dir(stage, root=ROOT):
-    """Return the active generation directory, or the legacy stage directory."""
-    stage_root = secrets_dir(stage, root)
-    current_file = stage_root / "CURRENT"
-
-    # Existing stages use the legacy layout until first generation is activated.
-    if not current_file.exists():
-        return stage_root
-
-    generation = current_file.read_text(encoding="ascii").strip()
-    if not GENERATION_ID.fullmatch(generation):
-        raise ValueError(f"Invalid CURRENT file for stage {stage}")
-
-    directory = stage_root / ".generations" / generation
-    if not directory.is_dir():
-        raise ValueError(f"Active secrets generation is missing for stage {stage}")
-    return directory
-
-
-def _secrets_path_in(data_dir, application):
-    """Return an application's store path within a particular directory."""
-    relative_path(application, "application")
-    return data_dir.joinpath(*application.split("/")).with_suffix(".json")
-
-
 def public_key_path(stage, root=ROOT):
     """Return the path to a stage's committed public key."""
-    return active_data_dir(stage, root) / "public.key"
+    return secrets_dir(stage, root) / "public.key"
 
 
 def secrets_path(stage, application, root=ROOT):
     """Return the validated encrypted store path for an application."""
-    return _secrets_path_in(active_data_dir(stage, root), application)
+    relative_path(application, "application")
+    return (
+        secrets_dir(stage, root).joinpath(*application.split("/")).with_suffix(".json")
+    )
+
+
+def key_id(public_key):
+    """Return a short fingerprint identifying which key encrypted a store."""
+    return hashlib.sha256(bytes(public_key)).hexdigest()[:16]
+
+
+def stale_store_error(stage, application):
+    """Explain a store whose key_id does not match the stage's public key."""
+    return ValueError(
+        f"secrets/{stage}/{application}.json was encrypted with a different key "
+        f"than secrets/{stage}/public.key. Merge the latest rekey into your branch, "
+        f"or, if a rekey was interruped, restore with: git checkout -- secrets/{stage}"
+    )
 
 
 def encode(data):
@@ -153,45 +144,56 @@ def load_private_key(path, stage, root=ROOT):
     return key
 
 
-def _read_store_in(data_dir, application):
-    """Read and validate an application's store from a specific directory."""
-    path = _secrets_path_in(data_dir, application)
+def read_store_file(stage, application, root=ROOT):
+    """Return an application's whole store document, or None if it has none."""
+    path = secrets_path(stage, application, root)
     if not path.is_file():
-        return {}
+        return None
     data = json.loads(path.read_text())
     if (
         not isinstance(data, dict)
         or data.get("version") != FORMAT_VERSION
+        or not isinstance(data.get("key_id"), str)
         or not isinstance(data.get("values"), dict)
     ):
         raise ValueError(f"Unsupported secrets file format: {path.name}")
-    return data["values"]
+    return data
 
 
 def read_store(stage, application, root=ROOT):
-    """Read an application's store from its active generation."""
-    return _read_store_in(active_data_dir(stage, root), application)
+    """Return an application's encrypted values keyed by secret name."""
+    data = read_store_file(stage, application, root)
+    return {} if data is None else data["values"]
 
 
-def _write_store_in(data_dir, application, values):
-    """Persist encrypted values in sorted JSON into a specific directory."""
-    path = _secrets_path_in(data_dir, application)
+def store_text(values, public_key):
+    """Serialize a store, recording which key its values were sealed with."""
+    document = {
+        "version": FORMAT_VERSION,
+        # Rekey rewrites this line in every store, so Git reports a conflict
+        # with any branch that changed secrets instead of silently dropping it.
+        "key_id": key_id(public_key),
+        "values": dict(sorted(values.items())),
+    }
+    return json.dumps(document, indent=2) + "\n"
+
+
+def write_store(stage, application, values, root=ROOT, public_key=None):
+    """Write an application's store, stamped with the key its values use.
+
+    Without public_key the stage's current key is used, and an existing store
+    must already match it, so values sealed with an older key are never relabeled.
+    """
+    path = secrets_path(stage, application, root)
+    if public_key is None:
+        public_key = load_public_key(stage, root)
+        existing = read_store_file(stage, application, root)
+        if existing is not None and existing["key_id"] != key_id(public_key):
+            raise stale_store_error(stage, application)
     if not values:
         path.unlink(missing_ok=True)
         return
-    write_atomic(
-        path,
-        json.dumps(
-            {"version": FORMAT_VERSION, "values": dict(sorted(values.items()))},
-            indent=2,
-        )
-        + "\n",
-    )
-
-
-def write_store(stage, application, values, root=ROOT):
-    """Persist encrypted values in sorted JSON into the application's active directory."""
-    _write_store_in(active_data_dir(stage, root), application, values)
+    write_atomic(path, store_text(values, public_key))
 
 
 def validate_name(name):
@@ -240,126 +242,69 @@ def unseal(private_key, stage, application, name, ciphertext):
 
 def decrypt_all(stage, application, key_file, root=ROOT):
     """Decrypt every stored secret for an application using its stage key."""
-    sealed = read_store(stage, application, root)
-    if not sealed:
+    data = read_store_file(stage, application, root)
+    if data is None or not data["values"]:
         return {}
     if not key_file:
         raise ValueError(
             f"Encrypted secrets exist for {stage}/{application}; supply --secrets-key or {KEY_ENV}"
         )
     private_key = load_private_key(key_file, stage, root)
+    if data["key_id"] != key_id(private_key.public_key):
+        raise stale_store_error(stage, application)
     result = {}
-    for name, ciphertext in sealed.items():
+    for name, ciphertext in data["values"].items():
         validate_name(name)
         result[name] = unseal(private_key, stage, application, name, ciphertext)
     return result
 
 
 def keygen(stage, private_key_out, root=ROOT):
-    """Create and activate the first generation for a stage."""
-    stage_root = secrets_dir(stage, root)
-    current_file = stage_root / "CURRENT"
-    legacy_public_key = stage_root / "public.key"
-    if current_file.exists() or legacy_public_key.exists():
+    """Create a stage's key pair; only public.key is written to the repository."""
+    public_path = public_key_path(stage, root)
+    if public_path.exists():
         raise ValueError(
-            f"Stage {stage} already has a key; use 'secrets rekey' to rotate it"
+            f"Stage {stage} already has a key; use secrets rekey to rotate it"
         )
-
-    _, existing_stores = _active_store_files(stage, root)
-    if existing_stores:
-        raise ValueError(
-            f"Stage {stage} has secret stores but no public key; resolve the legacy stores before keygen"
-        )
-
     key = PrivateKey.generate()
-    generation = uuid.uuid4().hex
-    generations_dir = stage_root / ".generations"
-    temporary_dir = generations_dir / (".tmp-" + generation)
-    final_dir = generations_dir / generation
-    temporary_dir.mkdir(parents=True)
-
-    write_atomic(temporary_dir / "public.key", encode(key.public_key) + "\n")
-    write_atomic(
-        temporary_dir / "generation.meta",
-        json.dumps({"version": 1, "id": generation, "parent": None}, indent=2) + "\n",
-    )
     write_private_key(private_key_out, key)
-    os.rename(temporary_dir, final_dir)
-    write_atomic(current_file, generation + "\n")
+    write_atomic(public_path, encode(key.public_key) + "\n")
 
 
 def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
-    """Build and verify a new secrets generation, then activate it with CURRENT."""
-    stage_root = secrets_dir(stage, root)
-    data_dir, store_paths = _active_store_files(stage, root)
-    current_file = stage_root / "CURRENT"
-    parent_generation = (
-        current_file.read_text(encoding="ascii").strip()
-        if current_file.exists()
-        else None
-    )
+    """Re-encrypt every store for a stage with a new key pair.
 
-    # Read and decrypt every current store before creating or activating anything.
+    Everything is decrypted, re-encrypted and verified in-memory before any file
+    changes. If writing is interrupted, key_id makes the mix of old and new stores
+    visible to 'secrets check', and Git restores the previous state.
+    """
+    if Path(new_private_key_out).exists():
+        raise FileExistsError(f"{new_private_key_out} already exists")
     old_key = load_private_key(old_key_file, stage, root)
-    stores = {}
-    for path in store_paths:
-        application = path.relative_to(data_dir).with_suffix("").as_posix()
-        sealed = _read_store_in(data_dir, application)
-        # Decrypt everything first so a bad entry aborts before any file changes.
-        stores[application] = {
-            name: unseal(old_key, stage, application, name, ciphertext)
-            for name, ciphertext in sealed.items()
-        }
-
-    generation = uuid.uuid4().hex
-    generations_dir = stage_root / ".generations"
-    temporary_dir = generations_dir / (".tmp-" + generation)
-    final_dir = generations_dir / generation
-
     new_key = PrivateKey.generate()
-
-    # Build the new generation without changing the active one.
-    write_atomic(temporary_dir / "public.key", encode(new_key.public_key) + "\n")
-    write_atomic(
-        temporary_dir / "generation.meta",
-        json.dumps(
-            {"version": 1, "id": generation, "parent": parent_generation}, indent=2
-        )
-        + "\n",
-    )
-
-    for application, values in stores.items():
-        encrypted = {
+    directory = secrets_dir(stage, root)
+    new_stores = {}
+    for path in sorted(directory.rglob("*.json")):
+        application = path.relative_to(directory).with_suffix("").as_posix()
+        values = {
+            name: unseal(old_key, stage, application, name, ciphertext)
+            for name, ciphertext in read_store(stage, application, root).items()
+        }
+        sealed = {
             name: seal(new_key.public_key, stage, application, name, value)
             for name, value in values.items()
         }
-        _write_store_in(temporary_dir, application, encrypted)
-
-    # Read the staged stores back to prove the new key decrypts them correctly.
-    for application, expected_values in stores.items():
-        staged_values = _read_store_in(temporary_dir, application)
-        if set(staged_values) != set(expected_values):
-            raise ValueError(f"Staged secrets did not verify for {stage}/{application}")
-
-        for name, expected_value in expected_values.items():
-            actual_value = unseal(
-                new_key, stage, application, name, staged_values[name]
-            )
-            if actual_value != expected_value:
-                raise ValueError(
-                    f"Staged secrets did not verify: {stage}/{application}/{name}"
-                )
-
-    # Save the private key before activation. Keep it outside of the repository.
+        # Prove the new key opens every value before anything is written.
+        for name, value in values.items():
+            if unseal(new_key, stage, application, name, sealed[name]) != value:
+                raise ValueError(f"Re-encryption did not verify: {application}/{name}")
+        new_stores[path] = store_text(sealed, new_key.public_key)
     write_private_key(new_private_key_out, new_key)
-
-    # Publish the complete generation, then switch the active pointer in CURRENT.
-    if final_dir.exists():
-        raise FileExistsError(f"Secrets generation already exists: {generation}")
-    os.rename(temporary_dir, final_dir)
-    write_atomic(stage_root / "CURRENT", generation + "\n")
-
-    return len(stores)
+    for path, text in new_stores.items():
+        write_atomic(path, text)
+    # public.key goes last: until it changes, 'secrets check' flags a partial rekey.
+    write_atomic(public_key_path(stage, root), encode(new_key.public_key) + "\n")
+    return len(new_stores)
 
 
 def plaintext_properties(content):
@@ -378,14 +323,24 @@ def plaintext_properties(content):
             yield key
 
 
-def check_store(stage, application, root, errors, warnings):
+def check_store(stage, application, root, errors, warnings, expected_key_id=None):
     """Validate one application's encrypted store and report template/property issues."""
     label = f"{stage}/{application}"
     try:
-        sealed = read_store(stage, application, root)
-        used, files = template_names(stage, application, root)
+        data = read_store_file(stage, application, root)
     except (ValueError, OSError) as exc:
         errors.append(f"{label}: {exc}")
+        return
+    sealed = {} if data is None else data["values"]
+    if data is not None and expected_key_id and data["key_id"] != expected_key_id:
+        errors.append(
+            f"{label} encrypted with a different key than public.key; "
+            "merge the latest rekey or restore an interruped one with git checkout"
+        )
+    try:
+        used, files = template_names(stage, application, root)
+    except (ValueError, OSError) as exc:
+        errors.append(f"{label}:{exc}")
         return
     if not sealed:
         errors.append(f"{label}: no encrypted secrets")
@@ -420,95 +375,6 @@ def check_store(stage, application, root, errors, warnings):
             )
 
 
-def _active_store_files(stage, root=ROOT):
-    """Return the active data dir and its application store files."""
-    data_dir = active_data_dir(stage, root)
-    stage_root = secrets_dir(stage, root)
-    paths = sorted(data_dir.rglob("*.json"))
-
-    # No CURRENT means legacy layout; ignore inactive generations and staging files
-    if data_dir == stage_root:
-        paths = [
-            path
-            for path in paths
-            if path.relative_to(stage_root).parts[0] != ".generations"
-        ]
-
-    return data_dir, paths
-
-
-def _generation_history(stage, root=ROOT):
-    """Return active generation IDs, newest first, following their parent links."""
-    stage_root = secrets_dir(stage, root)
-    current_file = stage_root / "CURRENT"
-    if not current_file.is_file():
-        raise ValueError(f"Stage {stage} has no active generations to prune")
-
-    active_data_dir(stage, root)
-    generation = current_file.read_text(encoding="ascii").strip()
-    generations_dir = stage_root / ".generations"
-    history = []
-    seen = set()
-
-    while generation:
-        if not GENERATION_ID.fullmatch(generation) or generation in seen:
-            raise ValueError(f"Invalid generation history for stage {stage}")
-        directory = generations_dir / generation
-        if directory.is_symlink() or not directory.is_dir():
-            raise ValueError(f"Generation {generation} is missing or invalid")
-        seen.add(generation)
-        history.append(generation)
-
-        metadata_path = directory / "generation.meta"
-        if not metadata_path.exists():
-            break
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid generation metadata for {generation}: {exc}"
-            ) from None
-        if (
-            not isinstance(metadata, dict)
-            or type(metadata.get("version")) is not int
-            or metadata["version"] != 1
-            or metadata.get("id") != generation
-            or "parent" not in metadata
-        ):
-            raise ValueError(f"Invalid generation metadata for {generation}")
-
-        parent = metadata["parent"]
-        if parent is None:
-            break
-        if not isinstance(parent, str) or not GENERATION_ID.fullmatch(parent):
-            raise ValueError(f"Invalid parent generation for {generation}")
-        if not (generations_dir / parent).exists():
-            break
-        generation = parent
-
-    return history
-
-
-def prune(stage, keep, delete=False, root=ROOT):
-    """Preview or delete generations older than the retained active history."""
-    if type(keep) is not int or keep < 1:
-        raise ValueError("--keep must be a positive integer")
-
-    history = _generation_history(stage, root)
-    removed = history[keep:]
-    if not delete:
-        return removed
-
-    generations_dir = secrets_dir(stage, root) / ".generations"
-    paths = [generations_dir / generation for generation in removed]
-    for path in paths:
-        if path.is_symlink() or not path.is_dir():
-            raise ValueError(f"Generation directory is missing or invalid: {path.name}")
-    for path in paths:
-        shutil.rmtree(path)
-    return removed
-
-
 def check(stage=None, application=None, root=ROOT):
     """Validate secrets stores without a private key; returns (errors, warnings)."""
     errors, warnings = [], []
@@ -521,22 +387,23 @@ def check(stage=None, application=None, root=ROOT):
     else:
         stages = []
     for stage_name in stages:
-        data_dir, store_paths = _active_store_files(stage_name, root)
+        directory = secrets_dir(stage_name, root)
         applications = (
             [application]
             if application
             else [
-                path.relative_to(data_dir).with_suffix("").as_posix()
-                for path in store_paths
+                path.relative_to(directory).with_suffix("").as_posix()
+                for path in sorted(directory.rglob("*.json"))
             ]
         )
+        expected_key_id = None
         if applications:
             try:
-                load_public_key(stage_name, root)
+                expected_key_id = key_id(load_public_key(stage_name, root))
             except ValueError as exc:
                 errors.append(f"{stage_name}: {exc}")
         for name in applications:
-            check_store(stage_name, name, root, errors, warnings)
+            check_store(stage_name, name, root, errors, warnings, expected_key_id)
     return errors, warnings
 
 
@@ -583,16 +450,6 @@ def parser():
     )
     check_parser.add_argument("--stage", help="Default: every stage")
     check_parser.add_argument("--application", help="Default: every application")
-    prune_parser = commands.add_parser(
-        "prune", help="Preview or remove generations older than the retained history"
-    )
-    prune_parser.add_argument("--stage", required=True)
-    prune_parser.add_argument(
-        "--keep", type=int, required=True, help="Number of generations to retain"
-    )
-    prune_parser.add_argument(
-        "--yes", action="store_true", help="Delete candidates (default is a dry run)"
-    )
     for name, help_text in (
         ("set", "Encrypt and store a value"),
         ("unset", "Remove a value"),
@@ -629,33 +486,15 @@ def run(argv, root=ROOT):
     if args.command == "keygen":
         keygen(args.stage, args.private_key_out, root)
         print(
-            f"Created the first secrets generation for {args.stage}; commit CURRENT "
-            "and the generation directory. "
+            f"Created secrets/{args.stage}/public.key; commit it.\n"
             f"Store {args.private_key_out} securely and back it up offline."
         )
     elif args.command == "rekey":
         count = rekey(args.stage, args.old_key, args.private_key_out, root)
         print(
-            f"Re-encrypted {count} application file(s) for {args.stage}. Commit CURRENT "
-            "and its generation together. Rotate the secret values too if the old key leaked."
+            f"Re-encrypted {count} application file(s) for {args.stage}. Commit all "
+            f"changes under secrets/{args.stage} together. Rotate the secret values too if the old key leaked."
         )
-    elif args.command == "prune":
-        removed = prune(args.stage, args.keep, delete=args.yes, root=root)
-        if not removed:
-            print(
-                f"No generations to prune for {args.stage}; active history is retained."
-            )
-        elif args.yes:
-            print(f"Removed {len(removed)} generation(s) from {args.stage}:")
-            for generation in removed:
-                print(generation)
-        else:
-            print(
-                f"Dry run: would remove {len(removed)} generation(s) from {args.stage}:"
-            )
-            for generation in removed:
-                print(generation)
-            print("Rerun with --yes to delete these generation directories.")
     elif args.command == "set":
         validate_name(args.name)
         public_key = load_public_key(args.stage, root)

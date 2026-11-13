@@ -11,7 +11,7 @@ from .config import relative_path
 
 
 def valid_url(url):
-    """Validate an artifact URL and return it without embedded credentials."""
+    """Return an HTTP(S) artifact URL, rejecting credentials, queries and fragments."""
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Artifact URLs must use HTTP or HTTPS")
