@@ -37,7 +37,7 @@ class SecretStoreTests(unittest.TestCase):
     def test_round_trip_keeps_names_readable_and_values_encrypted(self):
         """Keep secret names visible while encrypting values that decrypt correctly."""
         self.store("oba/oba-api", "jdbc_database_password", "p@ss=word\n")
-        path = self.root / "secrets" / "qa" / "oba" / "oba-api.json"
+        path = secrets.secrets_path("qa", "oba/oba-api", self.root)
         self.assertIn("jdbc_database_password", path.read_text())
         self.assertNotIn("p@ss", path.read_text())
         self.assertEqual(
@@ -140,6 +140,47 @@ class SecretStoreTests(unittest.TestCase):
             {"password": "value"},
         )
 
+    def test_prune_keeps_requested_active_history_and_defaults_to_dry_run(self):
+        """Preview old generations first and delete only beyond the keep count."""
+        self.store("app", "password", "value")
+        keys = [self.key]
+        for number in range(1, 4):
+            new_key = self.root / f"qa-{number}.private.key"
+            secrets.rekey("qa", keys[-1], new_key, self.root)
+            keys.append(new_key)
+
+        generations_dir = self.root / "secrets" / "qa" / ".generations"
+        current = self.root / "secrets" / "qa" / "CURRENT"
+        before = {path.name for path in generations_dir.iterdir() if path.is_dir()}
+        self.assertEqual(len(before), 4)
+
+        with redirect_stdout(io.StringIO()) as output:
+            secrets.run(["prune", "--stage", "qa", "--keep", "2"], self.root)
+        self.assertIn("Dry run", output.getvalue())
+        self.assertEqual(
+            {path.name for path in generations_dir.iterdir() if path.is_dir()}, before
+        )
+
+        with redirect_stdout(io.StringIO()) as output:
+            secrets.run(
+                ["prune", "--stage", "qa", "--keep", "2", "--yes"], self.root
+            )
+        self.assertIn("Removed 2 generation(s)", output.getvalue())
+
+        active = current.read_text().strip()
+        active_metadata = json.loads(
+            (generations_dir / active / "generation.meta").read_text()
+        )
+        remaining = {path.name for path in generations_dir.iterdir() if path.is_dir()}
+        self.assertEqual(
+            remaining,
+            {active, active_metadata["parent"]},
+        )
+        self.assertEqual(
+            secrets.decrypt_all("qa", "app", keys[-1], self.root),
+            {"password": "value"},
+        )
+
     @unittest.skipUnless(os.name == "posix", "POSIX permission check")
     def test_group_readable_private_key_is_rejected(self):
         """Reject private keys readable by group or other POSIX users."""
@@ -175,7 +216,47 @@ class SecretStoreTests(unittest.TestCase):
             {"password": "top-secret"},
         )
         self.assertNotIn(
-            "top-secret", (self.root / "secrets" / "qa" / "app.json").read_text()
+            "top-secret",
+            secrets.secrets_path("qa", "app", self.root).read_text(),
+        )
+
+    def test_keygen_and_set_store_files_in_the_initial_generation(self):
+        """Create CURRENT with keygen and have set write into its active generation."""
+        stage_root = self.root / "secrets" / "qa"
+        current = stage_root / "CURRENT"
+        self.assertTrue(current.is_file())
+
+        generation = current.read_text().strip()
+        data_dir = stage_root / ".generations" / generation
+        metadata = json.loads((data_dir / "generation.meta").read_text())
+        self.assertIsNone(metadata["parent"])
+        self.assertTrue((data_dir / "public.key").is_file())
+        self.assertFalse((stage_root / "public.key").exists())
+
+        with (
+            patch("sys.stdin", io.StringIO("top-secret\n")),
+            redirect_stdout(io.StringIO()),
+        ):
+            secrets.run(
+                [
+                    "set",
+                    "--stage",
+                    "qa",
+                    "--application",
+                    "app",
+                    "--name",
+                    "password",
+                    "--value-from",
+                    "-",
+                ],
+                self.root,
+            )
+
+        self.assertTrue((data_dir / "app.json").is_file())
+        self.assertFalse((stage_root / "app.json").exists())
+        self.assertEqual(
+            secrets.decrypt_all("qa", "app", self.key, self.root),
+            {"password": "top-secret"},
         )
 
 

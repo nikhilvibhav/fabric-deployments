@@ -178,7 +178,8 @@ Secrets live in Git, encrypted per environment with public-key cryptography
 service is required, so this works with any future CI/CD tool.
 
 - `secrets/STAGE/CURRENT` (committed) selects the active secrets generation.
-  Stages without this file still use the legacy layout until their first rekey.
+  New stages get this file from `keygen`; existing legacy stages without it
+  continue using the old layout until their first rekey.
 - `secrets/STAGE/.generations/GENERATION/` contains that generation's
   `public.key` and application JSON stores. The public key (committed) encrypts;
   anyone can add or rotate a value with it but cannot read existing values.
@@ -198,7 +199,7 @@ Values are decrypted in memory and rendered into the release
 arguments or paths (`jvm_options`, `java_bin`, `deploy_to`, etc.) are refused.
 
 ```sh
-# One-time per stage (operator): creates a public key; commit it.
+# One-time per stage (operator): creates the first generation and CURRENT; commit both.
 python -m deployment secrets keygen --stage qa --private-key-out /secure/qa.private.key
 
 # Add or rotate a value (anyone; prompts twice, or use --value-from - for stdin).
@@ -260,18 +261,70 @@ before connecting to any host when secrets exist and no valid key is supplied.
   key means re-entering every secret for that stage.
 - Never commit private keys. `.gitignore` excludes `*.private.key` and any
   `*.key` under `secrets/` except `public.key`, but check before committing.
-- Rotate a key with `secrets rekey --stage qa --old-key OLD --private-key-out NEW`.
-  It decrypts every active application store, writes and verifies a complete new
-  generation, then atomically switches `CURRENT`. The old generation remains
-  available as a recovery copy. Commit `CURRENT` and the new generation
-  together, then destroy the old private key only after verifying the new one.
-  Do not run `set`, `unset`, or another `rekey` for the same stage concurrently.
+- Do not run `set`, `unset`, `rekey`, or `prune` for the same stage concurrently.
   When rekeying a legacy-layout stage, its old root-level files remain inactive
   after the switch; `CURRENT` determines which files are active.
+- Prune old generations separately. `--keep` counts the current generation;
+  without `--yes`, the command only previews deletions:
+
+  ```sh
+  python -m deployment secrets prune --stage qa --keep 3
+  python -m deployment secrets prune --stage qa --keep 3 --yes
+  ```
+
+  Pruning follows the generation `parent` history and leaves incomplete or
+  unlinked generations untouched. Keep the corresponding private keys outside
+  Git for any old generation you may need to restore. Pruning removes files
+  from the working tree; it does not erase their ciphertext from Git history.
 - Git history keeps old ciphertext. If a private key leaks, rekeying is not
   enough: **rotate the actual secret values** (database passwords, etc.) too.
 - Revoking a person's ability to *add* secrets is not needed (encryption-only).
   Revoking someone who held a private key requires rekeying and rotating values.
+
+#### Rekeying a stage
+
+Run rekey from the repository checkout. Use a new private-key filename that
+doesn't already exist; the command will not overwrite a key. Keep it outside
+the repository and restrict access to it. The example uses QA; substitute the
+stage and paths you intend to rotate.
+
+```sh
+python -m deployment secrets rekey \
+  --stage qa \
+  --old-key /secure/qa.private.key \
+  --private-key-out /secure/qa-2026-11.private.key
+```
+
+Rekey decrypts every active application store before writing anything. It
+builds and verifies a new generation, then atomically updates `CURRENT` to
+activate it. If the command fails before that switch, the old generation stays
+active; a newly written private key or incomplete temporary generation may
+need inspection.
+
+Verify the new key against each application before relying on it. `verify`
+decrypts all secrets for the selected application but prints names only:
+
+```sh
+python -m deployment secrets verify \
+  --stage qa \
+  --application authentication-service \
+  --secrets-key /secure/qa-2026-11.private.key
+python -m deployment secrets check --stage qa
+```
+
+After verification, commit `CURRENT` and the generation it names together;
+never commit the private key:
+
+```sh
+generation=$(cat secrets/qa/CURRENT)
+git add secrets/qa/CURRENT "secrets/qa/.generations/$generation"
+git diff --cached --stat
+```
+
+Keep the old private key securely if you may need to restore its generation.
+Pruning that generation without its corresponding private key does not provide
+a usable rollback. If the old key was exposed, rotate the actual secret values
+too; rekeying alone does not invalidate leaked credentials.
 
 Rendered config files remain plaintext on target hosts (mode `0640`, group
 `camel`). Passwords already committed in plaintext `.properties` files can be

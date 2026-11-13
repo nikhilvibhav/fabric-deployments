@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -255,21 +256,47 @@ def decrypt_all(stage, application, key_file, root=ROOT):
 
 
 def keygen(stage, private_key_out, root=ROOT):
-    """Generate a stage key pair, storing the private key separately from the public key."""
-    public_path = public_key_path(stage, root)
-    if public_path.exists():
+    """Create and activate the first generation for a stage."""
+    stage_root = secrets_dir(stage, root)
+    current_file = stage_root / "CURRENT"
+    legacy_public_key = stage_root / "public.key"
+    if current_file.exists() or legacy_public_key.exists():
         raise ValueError(
             f"Stage {stage} already has a key; use 'secrets rekey' to rotate it"
         )
+
+    _, existing_stores = _active_store_files(stage, root)
+    if existing_stores:
+        raise ValueError(
+            f"Stage {stage} has secret stores but no public key; resolve the legacy stores before keygen"
+        )
+
     key = PrivateKey.generate()
+    generation = uuid.uuid4().hex
+    generations_dir = stage_root / ".generations"
+    temporary_dir = generations_dir / (".tmp-" + generation)
+    final_dir = generations_dir / generation
+    temporary_dir.mkdir(parents=True)
+
+    write_atomic(temporary_dir / "public.key", encode(key.public_key) + "\n")
+    write_atomic(
+        temporary_dir / "generation.meta",
+        json.dumps({"version": 1, "id": generation, "parent": None}, indent=2)
+        + "\n",
+    )
     write_private_key(private_key_out, key)
-    write_atomic(public_path, encode(key.public_key) + "\n")
+    os.rename(temporary_dir, final_dir)
+    write_atomic(current_file, generation + "\n")
 
 
 def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
     """Build and verify a new secrets generation, then activate it with CURRENT."""
     stage_root = secrets_dir(stage, root)
     data_dir, store_paths = _active_store_files(stage, root)
+    current_file = stage_root / "CURRENT"
+    parent_generation = (
+        current_file.read_text(encoding="ascii").strip() if current_file.exists() else None
+    )
 
     # Read and decrypt every current store before creating or activating anything.
     old_key = load_private_key(old_key_file, stage, root)
@@ -292,6 +319,13 @@ def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
 
     # Build the new generation without changing the active one.
     write_atomic(temporary_dir / "public.key", encode(new_key.public_key) + "\n")
+    write_atomic(
+        temporary_dir / "generation.meta",
+        json.dumps(
+            {"version": 1, "id": generation, "parent": parent_generation}, indent=2
+        )
+        + "\n",
+    )
 
     for application, values in stores.items():
         encrypted = {
@@ -402,6 +436,78 @@ def _active_store_files(stage, root=ROOT):
     return data_dir, paths
 
 
+def _generation_history(stage, root=ROOT):
+    """Return active generation IDs, newest first, following their parent links."""
+    stage_root = secrets_dir(stage, root)
+    current_file = stage_root / "CURRENT"
+    if not current_file.is_file():
+        raise ValueError(f"Stage {stage} has no active generations to prune")
+
+    active_data_dir(stage, root)
+    generation = current_file.read_text(encoding="ascii").strip()
+    generations_dir = stage_root / ".generations"
+    history = []
+    seen = set()
+
+    while generation:
+        if not GENERATION_ID.fullmatch(generation) or generation in seen:
+            raise ValueError(f"Invalid generation history for stage {stage}")
+        directory = generations_dir / generation
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"Generation {generation} is missing or invalid")
+        seen.add(generation)
+        history.append(generation)
+
+        metadata_path = directory / "generation.meta"
+        if not metadata_path.exists():
+            break
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid generation metadata for {generation}: {exc}"
+            ) from None
+        if (
+            not isinstance(metadata, dict)
+            or type(metadata.get("version")) is not int
+            or metadata["version"] != 1
+            or metadata.get("id") != generation
+            or "parent" not in metadata
+        ):
+            raise ValueError(f"Invalid generation metadata for {generation}")
+
+        parent = metadata["parent"]
+        if parent is None:
+            break
+        if not isinstance(parent, str) or not GENERATION_ID.fullmatch(parent):
+            raise ValueError(f"Invalid parent generation for {generation}")
+        if not (generations_dir / parent).exists():
+            break
+        generation = parent
+
+    return history
+
+
+def prune(stage, keep, delete=False, root=ROOT):
+    """Preview or delete generations older than the retained active history."""
+    if type(keep) is not int or keep < 1:
+        raise ValueError("--keep must be a positive integer")
+
+    history = _generation_history(stage, root)
+    removed = history[keep:]
+    if not delete:
+        return removed
+
+    generations_dir = secrets_dir(stage, root) / ".generations"
+    paths = [generations_dir / generation for generation in removed]
+    for path in paths:
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f"Generation directory is missing or invalid: {path.name}")
+    for path in paths:
+        shutil.rmtree(path)
+    return removed
+
+
 def check(stage=None, application=None, root=ROOT):
     """Validate secrets stores without a private key; returns (errors, warnings)."""
     errors, warnings = [], []
@@ -476,6 +582,16 @@ def parser():
     )
     check_parser.add_argument("--stage", help="Default: every stage")
     check_parser.add_argument("--application", help="Default: every application")
+    prune_parser = commands.add_parser(
+        "prune", help="Preview or remove generations older than the retained history"
+    )
+    prune_parser.add_argument("--stage", required=True)
+    prune_parser.add_argument(
+        "--keep", type=int, required=True, help="Number of generations to retain"
+    )
+    prune_parser.add_argument(
+        "--yes", action="store_true", help="Delete candidates (default is a dry run)"
+    )
     for name, help_text in (
         ("set", "Encrypt and store a value"),
         ("unset", "Remove a value"),
@@ -512,15 +628,29 @@ def run(argv, root=ROOT):
     if args.command == "keygen":
         keygen(args.stage, args.private_key_out, root)
         print(
-            f"Created secrets/{args.stage}/public.key; commit it. "
+            f"Created the first secrets generation for {args.stage}; commit CURRENT "
+            "and the generation directory. "
             f"Store {args.private_key_out} securely and back it up offline."
         )
     elif args.command == "rekey":
         count = rekey(args.stage, args.old_key, args.private_key_out, root)
         print(
-            f"Re-encrypted {count} application file(s) for {args.stage}. Commit the changes, "
-            "then destroy the old key. Rotate the secret values too if the old key leaked."
+            f"Re-encrypted {count} application file(s) for {args.stage}. Commit CURRENT "
+            "and its generation together. Rotate the secret values too if the old key leaked."
         )
+    elif args.command == "prune":
+        removed = prune(args.stage, args.keep, delete=args.yes, root=root)
+        if not removed:
+            print(f"No generations to prune for {args.stage}; active history is retained.")
+        elif args.yes:
+            print(f"Removed {len(removed)} generation(s) from {args.stage}:")
+            for generation in removed:
+                print(generation)
+        else:
+            print(f"Dry run: would remove {len(removed)} generation(s) from {args.stage}:")
+            for generation in removed:
+                print(generation)
+            print("Rerun with --yes to delete these generation directories.")
     elif args.command == "set":
         validate_name(args.name)
         public_key = load_public_key(args.stage, root)
