@@ -214,7 +214,9 @@ python -m deployment deploy \
   --health-url http://127.0.0.1:8080/actuator/health
 ```
 
-`artifact_url`, `artifact_sha256`, `path_to_jar`, and `artifactory_base_url` can also be supplied as environment variables. SHA-256 verification is optional; the actual digest and resolved URL are always recorded in release metadata. Use immutable exact versions/URLs plus expected digests for controlled promotion.
+`artifact_url`, `artifact_sha256`, `path_to_jar`, and `artifactory_base_url` can also be supplied as environment variables. SHA-256 verification is optional; the actual digest and resolved URL are always logged and recorded in release metadata.
+
+Snapshot builds (`-SNAPSHOT`, deployed to QA and QT) are rebuilt under the same version, so don't pin them. For a stable build, preprod's job log prints `Pin this build in later stages with: --sha256 DIGEST`. Pass that argument when deploying the same version to prod and DR; the deployment fails if Artifactory returns a different JAR.
 
 ## Manage encrypted secrets
 

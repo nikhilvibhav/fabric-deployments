@@ -37,20 +37,46 @@ than the Python logic.
      (`qa/oba-account-service`) and `rest.api.security.encoded_password`
      (`qa/tplms-finder-service`).
 
-3. **Artifacts and Artifactory credentials travel over plain HTTP** (HIGH,
-   earlier review #1). `DEFAULT_REPOSITORY` (`deployment/__main__.py:25`) is
-   `http://`, and SHA-256 verification is optional. Anyone who can intercept
-   the internal network path could:
+3. **Artifacts and Artifactory credentials travel over plain HTTP**
+   (MEDIUM, accepted risk; earlier review #1 rated it HIGH).
+   `DEFAULT_REPOSITORY` (`deployment/__main__.py:26`) is `http://`, and
+   SHA-256 verification is optional. Someone able to intercept traffic
+   between the controller and Artifactory could:
    - replace a JAR before it is deployed;
    - read the Bearer/Basic header that `Repository` attaches regardless of
      scheme.
 
-   Fixes:
-   - Make HTTPS the default.
-   - Refuse to send credentials to an `http://` URL.
-   - Require a trusted `--sha256` for production releases.
+   **Context:** Artifactory is 2.x on private servers in Azure, reachable
+   only on the internal network. It serves no SHA-256 checksums, and
+   switching it to HTTPS isn't straightforward. An attacker would need a
+   foothold inside the virtual network first, which is why this is
+   downgraded rather than closed.
 
-   How serious this is depends on whether the internal network path is trusted.
+   Artifactory's own checksums don't matter for verification: the CLI
+   computes the JAR's SHA-256 itself (`deployment/artifacts.py:138`), so
+   `--sha256` only needs a trusted value from outside the HTTP connection.
+   Artifactory 2.x's SHA-1 files wouldn't help, because whoever can swap the
+   JAR can swap its checksum too.
+
+   Practical mitigations within those limits:
+   - **Pin digests from preprod onwards.** QA and QT deploy `-SNAPSHOT`
+     builds from `develop`, which are rebuilt under the same version, so
+     pinning them adds nothing. Preprod, prod and DR all deploy the same
+     stable build from `release`. Every deployment logs the JAR's SHA-256
+     (stable builds also log a ready-to-copy `--sha256` argument) and
+     records it in the release metadata (`releases/<id>/.deployment/`).
+     Pass the digest from the preprod job log as `--sha256` when deploying
+     that version to prod and DR. That guarantees they run the exact JAR preprod
+     tested, whatever happens on the network.
+   - **Record the digest at build time** if the build pipeline can, and pass
+     that instead.
+   - **Limit what leaked credentials could do:** use anonymous read access
+     or a read-only account scoped to the release repositories.
+   - **Restrict port 8081** with an Azure network security group so only the
+     deployment controller's subnet can reach it.
+   - **Optional HTTPS:** put a TLS reverse proxy (nginx, or an internal
+     Azure Application Gateway) in front of Artifactory. This works with any
+     Artifactory version.
 
 4. ✅ **Fixed: Rekey wasn't atomic** (MEDIUM, earlier review #4).
    `rekey` (`deployment/secrets.py`) now decrypts, re-encrypts and verifies
@@ -135,7 +161,7 @@ the code on 2026-11-12.
 
 | # | Severity | Confidence | Finding | Status |
 | --- | --- | --- | --- | --- |
-| 1 | 🟠 HIGH | 8/10 | Default Artifactory URL is HTTP and SHA-256 verification is optional, so a JAR could be replaced in transit. | ❌ Open: see [Security #3](#-security). |
+| 1 | 🟠 HIGH | 8/10 | Default Artifactory URL is HTTP and SHA-256 verification is optional, so a JAR could be replaced in transit. | ⚠️ Accepted risk, downgraded to MEDIUM: Artifactory 2.x is on a private Azure network and serves no SHA-256. Mitigations in [Security #3](#-security). |
 | 2 | 🟡 MEDIUM | 8/10 | `sterr_logfile_backups` misspelled in `files/camel_supervisord`, so Supervisor could reject the config and trigger a rollback. | ✅ Fixed: `files/camel_supervisord:19` now reads `stderr_logfile_backups`. |
 | 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed (previously marked ❌): `valid_url()` now rejects user info, queries and fragments (`deployment/artifacts.py:17`), and `--health-url` is validated with it (`deployment/__main__.py:127`). |
 | 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ✅ Fixed: see [Security #4](#-security). |
@@ -146,8 +172,9 @@ the code on 2026-11-12.
 1. ✅ Stop `secrets verify` from printing values (done).
 2. ✅ Migrate the remaining plaintext credentials to encrypted secrets and rotate
    them; remove committed private keys.
-3. Use HTTPS for Artifactory, refuse credentials over HTTP, and require
-   digests for production.
+3. Pin prod and DR deployments to the SHA-256 recorded by the preprod
+   deployment of the same release build, and use a read-only Artifactory
+   account. HTTPS via a reverse proxy is optional.
 4. Harden the workflow: permissions, SHA pins, pinned ruff, pip-audit,
    gitleaks, Dependabot.
 5. Add a hashed lockfile for the controller's dependencies.

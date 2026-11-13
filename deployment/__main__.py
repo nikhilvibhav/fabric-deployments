@@ -227,6 +227,15 @@ def execute(args: argparse.Namespace) -> None:
         # Publishing is committed; pruning failure must not undo a healthy deployment.
         activated.clear()
         published = True
+        LOG.info(
+            "Published artifact %s with SHA-256 %s",
+            metadata["artifact_url"],
+            metadata["sha256"],
+        )
+        if args.release_type == "stable":
+            LOG.info(
+                "Pin this build in later stages with: --sha256 %s", metadata["sha256"]
+            )
         for remote in remotes:
             remote.cleanup(settings["keep_releases"])
         LOG.info("Deployment succeeded: %s", release_id)

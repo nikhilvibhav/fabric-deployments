@@ -448,7 +448,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
             """Create the minimal bundle needed by the integration test."""
             path = workspace / "bundle"
             path.mkdir()
-            return path, {}
+            return path, {"artifact_url": "http://repo/app.jar", "sha256": "ab12"}
 
         with (
             patch.object(

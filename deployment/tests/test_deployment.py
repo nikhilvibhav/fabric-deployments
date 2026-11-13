@@ -493,6 +493,47 @@ class OrchestrationTests(unittest.TestCase):
             ]
         )
 
+    def deploy_with_fake_bundle(self, args, *remotes):
+        """Run a deployment with mocked hosts and a fake downloaded artifact."""
+        with (
+            patch("deployment.remote.Remote", side_effect=list(remotes)),
+            patch.object(cli, "prepare_bundle") as prepare,
+            patch.object(
+                cli, "decrypt_all", return_value={"truststore_password": "test-value"}
+            ),
+        ):
+
+            def bundle(args, values, workspace):
+                """Create a minimal fake bundle for the orchestration test."""
+                path = workspace / "bundle"
+                path.mkdir()
+                return path, {"artifact_url": "http://repo/app.jar", "sha256": "ab12"}
+
+            prepare.side_effect = bundle
+            cli.execute(args)
+
+    def test_stable_deployment_logs_digest_to_pin_later_stages(self):
+        """Log the published digest and how to pin it for a stable build."""
+        with self.assertLogs("camel-deploy") as logs:
+            self.deploy_with_fake_bundle(self.args(), MagicMock(), MagicMock())
+        self.assertIn(
+            "INFO:camel-deploy:Published artifact http://repo/app.jar with SHA-256 ab12",
+            logs.output,
+        )
+        self.assertIn(
+            "INFO:camel-deploy:Pin this build in later stages with: --sha256 ab12",
+            logs.output,
+        )
+
+    def test_snapshot_deployment_logs_digest_without_pin_hint(self):
+        """Skip the pinning hint for snapshots, which are rebuilt under one version."""
+        args = self.args()
+        args.version = "1.0.0-SNAPSHOT"
+        with self.assertLogs("camel-deploy") as logs:
+            self.deploy_with_fake_bundle(args, MagicMock(), MagicMock())
+        self.assertTrue(any("SHA-256 ab12" in line for line in logs.output))
+        self.assertFalse(any("--sha256" in line for line in logs.output))
+
     def test_offline_plan_never_opens_ssh_and_does_not_print_variables(self):
         """Keep planning offline and omit the full deployment variable set."""
         with (
@@ -575,23 +616,8 @@ class OrchestrationTests(unittest.TestCase):
         """Keep a healthy published release active if pruning later fails."""
         first, second = MagicMock(), MagicMock()
         first.cleanup.side_effect = RuntimeError("prune failed")
-        with (
-            patch("deployment.remote.Remote", side_effect=[first, second]),
-            patch.object(cli, "prepare_bundle") as prepare,
-            patch.object(
-                cli, "decrypt_all", return_value={"truststore_password": "test-value"}
-            ),
-        ):
-
-            def bundle(args, values, workspace):
-                """Create a minimal fake bundle for the orchestration test."""
-                path = workspace / "bundle"
-                path.mkdir()
-                return path, {}
-
-            prepare.side_effect = bundle
-            with self.assertRaisesRegex(RuntimeError, "prune failed"):
-                cli.execute(self.args())
+        with self.assertRaisesRegex(RuntimeError, "prune failed"):
+            self.deploy_with_fake_bundle(self.args(), first, second)
         first.restore.assert_not_called()
         second.restore.assert_not_called()
 
