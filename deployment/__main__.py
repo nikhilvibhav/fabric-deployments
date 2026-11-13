@@ -5,8 +5,10 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import urlsplit
 
 from . import secrets as secrets_cli
@@ -24,6 +26,41 @@ from .secrets import KEY_ENV, decrypt_all, read_store
 
 LOG = logging.getLogger("camel-deploy")
 DEFAULT_REPOSITORY = "http://10.90.135.56:8081/artifactory/simple"
+# ANSI colour codes for level names; messages stay uncoloured.
+LEVEL_COLOURS = {
+    logging.DEBUG: "2",
+    logging.INFO: "34",
+    logging.WARNING: "33",
+    logging.ERROR: "31",
+    logging.CRITICAL: "1;31",
+}
+
+
+class LevelColourFormatter(logging.Formatter):
+    """Format records as 'LEVEL: message', optionally colouring the level name."""
+
+    def __init__(self, colour: bool) -> None:
+        """Choose whether level names are wrapped in ANSI colour codes."""
+        super().__init__("%(levelname)s: %(message)s")
+        self.colour = colour
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Colour only the level prefix so messages stay plain and copyable."""
+        text = super().format(record)
+        code = LEVEL_COLOURS.get(record.levelno)
+        if not self.colour or not code:
+            return text
+        level = record.levelname
+        return f"\033[{code}m{level}\033[0m{text[len(level) :]}"
+
+
+def use_colour(stream: TextIO, environ: Mapping[str, str]) -> bool:
+    """Colour terminals by default; NO_COLOR disables and FORCE_COLOR enables it."""
+    if environ.get("NO_COLOR"):
+        return False
+    if environ.get("FORCE_COLOR", "0") != "0":
+        return True
+    return stream.isatty() and environ.get("TERM") != "dumb"
 
 
 def release_type_for_version(version: str, requested: str | None = None) -> str:
@@ -294,7 +331,9 @@ def main(argv: list[str] | None = None) -> int:
         parser().error(
             "--application or the application environment variable is required"
         )
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(LevelColourFormatter(use_colour(sys.stderr, os.environ)))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     try:
         execute(args)
     except Exception as exc:

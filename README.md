@@ -353,6 +353,18 @@ Rendered config files remain plaintext on target hosts with mode `0640` and grou
 
 Deployments acquire per-application locks on every selected host, then deploy sequentially. Each release includes configuration and an audited artifact digest. The tool saves the previous `current` target and service definition, installs the new definition, atomically switches `current`, restarts the service, and checks its process state.
 
+Each step is logged to standard error as `LEVEL: message`, one line per message, so URLs and digests can be copied from the job log. On a terminal the level name is coloured. CI output is plain by default; to colour it in Jenkins, install the [AnsiColor plugin](https://plugins.jenkins.io/ansicolor/), set `FORCE_COLOR=1`, and wrap the step:
+
+```groovy
+ansiColor('xterm') {
+    withEnv(['FORCE_COLOR=1']) {
+        sh 'uv run python -m deployment deploy ...'
+    }
+}
+```
+
+`NO_COLOR=1` turns colour off everywhere.
+
 If `--health-url` is supplied, HTTP readiness is also required, with up to 12 attempts at five-second intervals. Without it, **process status alone is not application readiness**.
 
 QA, QE, and QT retain Supervisor. Other environments retain the existing SysV script and `service`/systemd compatibility behavior; this is not a service-manager migration. A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.

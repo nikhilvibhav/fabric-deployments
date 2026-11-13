@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 import tempfile
 import threading
 import unittest
@@ -560,6 +561,39 @@ class OrchestrationTests(unittest.TestCase):
             self.deploy_with_fake_bundle(args, MagicMock(), MagicMock())
         self.assertTrue(any("SHA-256 ab12" in line for line in logs.output))
         self.assertFalse(any("--sha256" in line for line in logs.output))
+
+    def test_log_format_colours_only_the_level_name(self):
+        """Colour the level prefix when enabled and leave the message untouched."""
+        record = logging.LogRecord(
+            "camel-deploy",
+            logging.ERROR,
+            __file__,
+            1,
+            "Pin with: --sha256 %s",
+            ("a" * 64,),
+            None,
+        )
+        message = "Pin with: --sha256 " + "a" * 64
+        self.assertEqual(
+            cli.LevelColourFormatter(colour=False).format(record), "ERROR: " + message
+        )
+        self.assertEqual(
+            cli.LevelColourFormatter(colour=True).format(record),
+            "\033[31mERROR\033[0m: " + message,
+        )
+
+    def test_colour_follows_terminal_and_environment_overrides(self):
+        """Use colour on terminals, honour FORCE_COLOR and NO_COLOR, skip dumb ones."""
+        terminal, pipe = MagicMock(), MagicMock()
+        terminal.isatty.return_value = True
+        pipe.isatty.return_value = False
+        self.assertTrue(cli.use_colour(terminal, {}))
+        self.assertFalse(cli.use_colour(terminal, {"TERM": "dumb"}))
+        self.assertFalse(cli.use_colour(terminal, {"NO_COLOR": "1"}))
+        self.assertFalse(cli.use_colour(pipe, {}))
+        self.assertFalse(cli.use_colour(pipe, {"FORCE_COLOR": "0"}))
+        self.assertTrue(cli.use_colour(pipe, {"FORCE_COLOR": "1"}))
+        self.assertFalse(cli.use_colour(pipe, {"FORCE_COLOR": "1", "NO_COLOR": "1"}))
 
     def test_offline_plan_never_opens_ssh_and_does_not_print_variables(self):
         """Keep planning offline and omit the full deployment variable set."""
