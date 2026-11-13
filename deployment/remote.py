@@ -5,16 +5,18 @@ import re
 import shlex
 import time
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from fabric import Connection
 from invoke.exceptions import CommandTimedOut, UnexpectedExit
+from invoke.runners import Result
 from paramiko import RejectPolicy
 
-from .config import ROOT, render_file
+from .config import ROOT, Values, render_file
 
 
-def q(value):
+def q(value: object) -> str:
     """Shell-quote a value before including it in a remote command."""
     return shlex.quote(str(value))
 
@@ -22,7 +24,13 @@ def q(value):
 class Remote:
     """Manage a locked application deployment on one SSH host."""
 
-    def __init__(self, host, values, supervisor, health_url=None):
+    def __init__(
+        self,
+        host: str,
+        values: Values,
+        supervisor: bool,
+        health_url: str | None = None,
+    ) -> None:
         """Configure the SSH connection and service details for a host."""
         self.connection = Connection(host, connect_timeout=20)
         self.connection.client.load_system_host_keys()
@@ -39,7 +47,7 @@ class Remote:
         )
         self.locked = False
 
-    def run(self, command, **kwargs):
+    def run(self, command: str, **kwargs: Any) -> Result:
         """Run a remote command and log its context without exposing command output."""
         try:
             return self.connection.run(command, hide=True, timeout=120, **kwargs)
@@ -50,15 +58,15 @@ class Remote:
             )
             raise
 
-    def put(self, content, path):
+    def put(self, content: bytes, path: str) -> None:
         """Upload in-memory bytes to a remote path."""
         self.connection.put(io.BytesIO(content), remote=path)
 
-    def exists(self, path):
+    def exists(self, path: str) -> bool:
         """Return whether a remote path exists."""
         return self.run(f"test -e {q(path)}", warn=True).ok
 
-    def lock(self):
+    def lock(self) -> None:
         """Create the host's deployment lock and check service-manager conflicts."""
         # mkdir is also an atomic cross-job lock; never steal a stale lock automatically.
         self.run(f"mkdir -p {q(self.base + '/releases')} {q(self.base + '/shared')}")
@@ -69,7 +77,7 @@ class Remote:
                 "Both service managers may be configured; migrate the SysV service explicitly first"
             )
 
-    def close(self):
+    def close(self) -> None:
         """Release the deployment lock and close the SSH connection."""
         try:
             if self.locked:
@@ -77,7 +85,7 @@ class Remote:
         finally:
             self.connection.close()
 
-    def current(self):
+    def current(self) -> str | None:
         """Return the validated active release path, or None if none is active."""
         path = self.base + "/current"
         if not self.run(f"test -L {q(path)}", warn=True).ok:
@@ -91,7 +99,7 @@ class Remote:
         self.validate_release(target)
         return target
 
-    def validate_release(self, path):
+    def validate_release(self, path: str) -> None:
         """Ensure a release path is a direct child of this application's releases."""
         parent = str(PurePosixPath(path).parent)
         if parent != self.base + "/releases" or not re.fullmatch(
@@ -101,7 +109,13 @@ class Remote:
                 "Release path is outside this application's releases directory"
             )
 
-    def prepare(self, bundle, release, metadata, shared):
+    def prepare(
+        self,
+        bundle: Path,
+        release: str,
+        metadata: dict[str, str],
+        shared: dict[str, bytes],
+    ) -> dict[str, Any]:
         """Upload a release and stage its service, shared files, and rollback state."""
         self.validate_release(release)
         self.run(f"mkdir {q(release)} && mkdir -m 700 {q(release + '/.deployment')}")
@@ -121,7 +135,7 @@ class Remote:
             self.run(
                 f"sudo -n cp -p {q(self.service_file)} {q(release + '/.deployment/service.previous')}"
             )
-        shared_existed = {}
+        shared_existed: dict[str, bool] = {}
         for name, content in shared.items():
             if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
                 raise ValueError("Invalid shared filename")
@@ -160,7 +174,7 @@ class Remote:
         )
         return state
 
-    def switch(self, release):
+    def switch(self, release: str) -> None:
         """Atomically point the current symlink at a validated release."""
         self.validate_release(release)
         temporary = self.base + "/.current-" + uuid.uuid4().hex
@@ -168,7 +182,7 @@ class Remote:
             f"ln -s {q(release)} {q(temporary)} && mv -Tf {q(temporary)} {q(self.base + '/current')}"
         )
 
-    def activate(self, release):
+    def activate(self, release: str) -> None:
         """Install staged files, switch releases, restart the service, and verify health."""
         state = self.load_state(release)
         for name in state["shared_existed"]:
@@ -192,7 +206,7 @@ class Remote:
             self.lifecycle("restart")
         self.healthy()
 
-    def lifecycle(self, action):
+    def lifecycle(self, action: str) -> None:
         """Apply a service lifecycle action, avoiding redundant known transitions."""
         if self.supervisor:
             status = self.run(
@@ -209,7 +223,7 @@ class Remote:
         else:
             self.run(f"sudo -n /sbin/service {q(self.service)} {action}")
 
-    def healthy(self):
+    def healthy(self) -> None:
         """Wait for the service and optional HTTP endpoint to become healthy."""
         for attempt in range(12):
             if self.supervisor:
@@ -234,7 +248,7 @@ class Remote:
                 time.sleep(5)
         raise RuntimeError("Service did not become healthy within the startup window")
 
-    def load_state(self, release):
+    def load_state(self, release: str) -> dict[str, Any]:
         """Load and validate rollback metadata for a release."""
         self.validate_release(release)
         state = json.loads(
@@ -251,7 +265,7 @@ class Remote:
                 raise ValueError("Previous release no longer exists")
         return state
 
-    def restore(self, release, state):
+    def restore(self, release: str, state: dict[str, Any]) -> None:
         """Restore the prior service definition, shared files, and active release."""
         if state["service_existed"]:
             self.run(
@@ -282,7 +296,7 @@ class Remote:
             self.lifecycle("restart")
             self.healthy()
 
-    def cleanup(self, keep):
+    def cleanup(self, keep: int) -> None:
         """Prune old managed releases while retaining current and rollback targets."""
         # Restrict pruning to releases created by this deployment tool.
         result = self.run(

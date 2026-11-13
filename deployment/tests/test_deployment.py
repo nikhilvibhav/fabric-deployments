@@ -64,7 +64,7 @@ class ConfigurationTests(unittest.TestCase):
             "oba/oba-api",
             "1.2.3",
             True,
-            {},
+            {"keep_releases": 1, "use_supervisor": False},
             environ={
                 "java_opts": "'-Xmx256m -Xms128m'",
                 "jdbc_database_password": "secret",
@@ -76,7 +76,14 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(values["jvm_options"], "-Xmx256m -Xms128m")
         self.assertEqual(values["jdbc_database_password"], "secret")
         with self.assertRaisesRegex(ValueError, "explicit version"):
-            variables("qa", "app", "latest", True, {}, environ={})
+            variables(
+                "qa",
+                "app",
+                "latest",
+                True,
+                {"keep_releases": 1, "use_supervisor": False},
+                environ={},
+            )
 
     def test_unsafe_parameters_and_boolean_typos_fail(self):
         """Reject unsafe paths and malformed boolean values."""
@@ -88,7 +95,14 @@ class ConfigurationTests(unittest.TestCase):
             "app\\nested",
         ):
             with self.subTest(application=application), self.assertRaises(ValueError):
-                variables("qa", application, "1", False, {}, environ={})
+                variables(
+                    "qa",
+                    application,
+                    "1",
+                    False,
+                    {"keep_releases": 1, "use_supervisor": False},
+                    environ={},
+                )
         with self.assertRaises(ValueError):
             boolean("flase")
 

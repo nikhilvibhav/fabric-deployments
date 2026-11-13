@@ -116,12 +116,11 @@ test already covers rendering.
   each suppressed with a reason: URL schemes are validated, ElementTree
   doesn't resolve external entities, and a test runs `git` with fixed
   arguments.
-- **Type hints and mypy.**
-  - ✅ mypy runs in CI with `check_untyped_defs`, so function bodies are
-    checked even before they are annotated.
-  - ❌ Still open: function signatures have no annotations yet. Start with
-    Fabric/paramiko call sites and the inventory dicts, then enable
-    `disallow_untyped_defs` module by module.
+- ✅ **Done: type hints and mypy.** mypy runs in CI with
+  `check_untyped_defs`. Every function signature outside the tests is
+  annotated, and `disallow_untyped_defs` is enabled for those modules.
+  Inventory settings are a `Settings` `TypedDict`; deployment variables and
+  rollback state stay `dict[str, Any]`.
 - **`lookup-hostnames.sh` hardcodes a username and the inventory IPs.** Read
   the IPs from `deployment/inventories/*.json` so the two can't drift, and
   take the user as a parameter.

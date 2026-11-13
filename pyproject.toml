@@ -45,3 +45,15 @@ ignore_missing_imports = true
 # Tests replace methods with mocks on purpose.
 module = ["deployment.tests.*"]
 disable_error_code = ["method-assign"]
+
+[[tool.mypy.overrides]]
+# Annotated modules: every function signature must have type hints.
+module = [
+    "deployment.__main__",
+    "deployment.artifacts",
+    "deployment.config",
+    "deployment.remote",
+    "deployment.secrets",
+    "tasks",
+]
+disallow_untyped_defs = true

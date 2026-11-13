@@ -1,8 +1,10 @@
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any, NotRequired, TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 # [[name]] avoids Spring/logback ${...} and Camel {{...}}, both resolved at runtime.
@@ -36,15 +38,25 @@ DEFAULTS = {
 }
 SECRET_KEYS = {"jdbc_database_password", "mongodb_password", "big_username"}
 
+Values = dict[str, Any]
 
-def boolean(value):
+
+class Settings(TypedDict):
+    """Stage-wide settings from an inventory file, with defaults filled in."""
+
+    keep_releases: int
+    use_supervisor: bool
+    gelf_host: NotRequired[str]
+
+
+def boolean(value: object) -> bool:
     """Parse a strict true/false option value."""
     if str(value).lower() not in {"true", "false"}:
         raise ValueError("Boolean parameters must be true or false")
     return str(value).lower() == "true"
 
 
-def relative_path(value, label):
+def relative_path(value: str, label: str) -> str:
     """Validate and return a safe slash-separated relative path."""
     if not value or any(
         not SEGMENT.fullmatch(part) or part in {".", ".."} for part in value.split("/")
@@ -63,7 +75,7 @@ class Host:
     roles: tuple[str, ...]
 
 
-def environment(stage, root=ROOT):
+def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
     """Load and validate stage settings and host inventory."""
     if not SEGMENT.fullmatch(stage) or stage in {".", ".."}:
         raise ValueError("Invalid stage")
@@ -89,7 +101,11 @@ def environment(stage, root=ROOT):
         )
     ):
         raise ValueError(f"Invalid environment settings in {path.name}")
-    settings = {"keep_releases": 1, "use_supervisor": False, **supplied_settings}
+    settings: Settings = {
+        "keep_releases": 1,
+        "use_supervisor": False,
+        **supplied_settings,
+    }
     hosts = []
     for item in document["hosts"] if isinstance(document["hosts"], list) else ():
         if (
@@ -111,7 +127,7 @@ def environment(stage, root=ROOT):
     return settings, hosts
 
 
-def select_hosts(hosts, roles):
+def select_hosts(hosts: list[Host], roles: str) -> list[str]:
     """Return addresses for hosts matching the requested comma-separated roles."""
     wanted = set(roles.split(","))
     known = {role for host in hosts for role in host.roles}
@@ -121,15 +137,15 @@ def select_hosts(hosts, roles):
 
 
 def variables(
-    stage,
-    application,
-    version,
-    second,
-    settings,
-    vars_file=None,
-    environ=None,
-    secret_values=None,
-):
+    stage: str,
+    application: str,
+    version: str,
+    second: bool,
+    settings: Settings,
+    vars_file: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    secret_values: dict[str, str] | None = None,
+) -> Values:
     """Merge defaults, file, environment, and secret values into deployment variables."""
     environ = os.environ if environ is None else environ
     values = dict(DEFAULTS)
@@ -185,10 +201,10 @@ def variables(
     return values
 
 
-def render(text, values):
+def render(text: str, values: Mapping[str, Any]) -> str:
     """Substitute deployment placeholders once, failing for missing values."""
 
-    def replace(match):
+    def replace(match: re.Match[str]) -> str:
         """Resolve one placeholder from the supplied variable mapping."""
         key = match.group(1)
         if key not in values:
@@ -198,7 +214,7 @@ def render(text, values):
     return PLACEHOLDER.sub(replace, text)
 
 
-def utf8(data, path):
+def utf8(data: bytes, path: Path) -> str:
     """Decode renderable template bytes as UTF-8 with a path-aware error."""
     try:
         return data.decode("utf-8")
@@ -208,7 +224,7 @@ def utf8(data, path):
         ) from None
 
 
-def render_file(path, values):
+def render_file(path: Path, values: Mapping[str, Any]) -> bytes:
     """Render a template file while preserving untouched files byte-for-byte."""
     data = path.read_bytes()
     if not PLACEHOLDER_BYTES.search(data):
@@ -216,7 +232,9 @@ def render_file(path, values):
     return render(utf8(data, path), values).encode("utf-8")
 
 
-def config_files(stage, application, values, root=ROOT):
+def config_files(
+    stage: str, application: str, values: Mapping[str, Any], root: Path = ROOT
+) -> dict[str, bytes]:
     """Collect, flatten, and render configuration files for an application."""
     source = root / "files" / stage / application
     if not source.is_dir():
@@ -239,32 +257,34 @@ def config_files(stage, application, values, root=ROOT):
     return files
 
 
-class _Recorder(dict):
+class _Recorder(dict[str, str]):
     """Renders every placeholder as empty while recording its name."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize an empty variable-name recorder."""
         super().__init__()
-        self.names = set()
+        self.names: set[str] = set()
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         """Treat every name as available so rendering can enumerate placeholders."""
         return True
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> str:
         """Record a requested placeholder and return its blank replacement."""
         self.names.add(key)
         return ""
 
 
-def template_names(stage, application, root=ROOT):
+def template_names(
+    stage: str, application: str, root: Path = ROOT
+) -> tuple[set[str], dict[str, bytes]]:
     """Placeholder names and blank-rendered files, selected exactly as deploy does."""
     recorder = _Recorder()
     files = config_files(stage, application, recorder, root)
     return recorder.names, files
 
 
-def shared_files(stage, application, root=ROOT):
+def shared_files(stage: str, application: str, root: Path = ROOT) -> dict[str, bytes]:
     """Read application-level shared files that must persist across releases."""
     source = root / "files" / stage / application
     return {path.stem: path.read_bytes() for path in sorted(source.glob("*.shared"))}

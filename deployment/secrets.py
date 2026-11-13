@@ -16,7 +16,9 @@ import re
 import stat
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from nacl.bindings import crypto_box_SEALBYTES
 from nacl.exceptions import CryptoError
@@ -47,19 +49,19 @@ RESERVED = {
 }
 
 
-def secrets_dir(stage, root=ROOT):
+def secrets_dir(stage: str, root: Path = ROOT) -> Path:
     """Return the validated directory holding secrets for a stage."""
     if not SEGMENT.fullmatch(stage) or stage in {".", ".."}:
         raise ValueError("Invalid stage")
     return root / "secrets" / stage
 
 
-def public_key_path(stage, root=ROOT):
+def public_key_path(stage: str, root: Path = ROOT) -> Path:
     """Return the path to a stage's committed public key."""
     return secrets_dir(stage, root) / "public.key"
 
 
-def secrets_path(stage, application, root=ROOT):
+def secrets_path(stage: str, application: str, root: Path = ROOT) -> Path:
     """Return the validated encrypted store path for an application."""
     relative_path(application, "application")
     return (
@@ -67,12 +69,12 @@ def secrets_path(stage, application, root=ROOT):
     )
 
 
-def key_id(public_key):
+def key_id(public_key: PublicKey) -> str:
     """Return a short fingerprint identifying which key encrypted a store."""
     return hashlib.sha256(bytes(public_key)).hexdigest()[:16]
 
 
-def stale_store_error(stage, application):
+def stale_store_error(stage: str, application: str) -> ValueError:
     """Explain a store whose key_id does not match the stage's public key."""
     return ValueError(
         f"secrets/{stage}/{application}.json was encrypted with a different key "
@@ -81,12 +83,12 @@ def stale_store_error(stage, application):
     )
 
 
-def encode(data):
+def encode(data: bytes | PublicKey | PrivateKey) -> str:
     """Encode bytes or key material as base64 text."""
     return base64.b64encode(bytes(data)).decode()
 
 
-def decode(text, label):
+def decode(text: str, label: str) -> bytes:
     """Decode strict base64 text and identify malformed input by label."""
     try:
         return base64.b64decode(text.strip(), validate=True)
@@ -94,7 +96,7 @@ def decode(text, label):
         raise ValueError(f"Invalid base64 in {label}") from None
 
 
-def write_atomic(path, text):
+def write_atomic(path: Path, text: str) -> None:
     """Write text through a sibling temporary file and atomically replace the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
@@ -107,7 +109,7 @@ def write_atomic(path, text):
         raise
 
 
-def write_private_key(path, key):
+def write_private_key(path: str | Path, key: PrivateKey) -> None:
     """Create a private key file without overwriting existing files."""
     path = Path(path)
     # O_EXCL never overwrites an existing key; 0600 limits access on POSIX.
@@ -116,7 +118,7 @@ def write_private_key(path, key):
         output.write(encode(key) + "\n")
 
 
-def load_public_key(stage, root=ROOT):
+def load_public_key(stage: str, root: Path = ROOT) -> PublicKey:
     """Load and validate the 32-byte public key for a stage."""
     path = public_key_path(stage, root)
     if not path.is_file():
@@ -127,7 +129,7 @@ def load_public_key(stage, root=ROOT):
     return PublicKey(data)
 
 
-def load_private_key(path, stage, root=ROOT):
+def load_private_key(path: str | Path, stage: str, root: Path = ROOT) -> PrivateKey:
     """Load a protected private key and verify that it matches the stage key."""
     path = Path(path)
     if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
@@ -144,7 +146,9 @@ def load_private_key(path, stage, root=ROOT):
     return key
 
 
-def read_store_file(stage, application, root=ROOT):
+def read_store_file(
+    stage: str, application: str, root: Path = ROOT
+) -> dict[str, Any] | None:
     """Return an application's whole store document, or None if it has none."""
     path = secrets_path(stage, application, root)
     if not path.is_file():
@@ -160,13 +164,13 @@ def read_store_file(stage, application, root=ROOT):
     return data
 
 
-def read_store(stage, application, root=ROOT):
+def read_store(stage: str, application: str, root: Path = ROOT) -> dict[str, str]:
     """Return an application's encrypted values keyed by secret name."""
     data = read_store_file(stage, application, root)
     return {} if data is None else data["values"]
 
 
-def store_text(values, public_key):
+def store_text(values: dict[str, str], public_key: PublicKey) -> str:
     """Serialize a store, recording which key its values were sealed with."""
     document = {
         "version": FORMAT_VERSION,
@@ -178,7 +182,13 @@ def store_text(values, public_key):
     return json.dumps(document, indent=2) + "\n"
 
 
-def write_store(stage, application, values, root=ROOT, public_key=None):
+def write_store(
+    stage: str,
+    application: str,
+    values: dict[str, str],
+    root: Path = ROOT,
+    public_key: PublicKey | None = None,
+) -> None:
     """Write an application's store, stamped with the key its values use.
 
     Without public_key the stage's current key is used, and an existing store
@@ -196,7 +206,7 @@ def write_store(stage, application, values, root=ROOT, public_key=None):
     write_atomic(path, store_text(values, public_key))
 
 
-def validate_name(name):
+def validate_name(name: str) -> None:
     """Reject invalid or deployment-reserved secret names."""
     if not NAME.fullmatch(name):
         raise ValueError(f"Invalid secret name: {name}")
@@ -206,7 +216,7 @@ def validate_name(name):
         )
 
 
-def bound_payload(stage, application, name, value):
+def bound_payload(stage: str, application: str, name: str, value: str) -> bytes:
     """Serialize a secret with its stage, application, and name identity."""
     # Binding identity into the plaintext stops ciphertext being moved between apps or names.
     return json.dumps(
@@ -214,14 +224,18 @@ def bound_payload(stage, application, name, value):
     ).encode()
 
 
-def seal(public_key, stage, application, name, value):
+def seal(
+    public_key: PublicKey, stage: str, application: str, name: str, value: str
+) -> str:
     """Encrypt a value in a sealed box with its identity bound into the payload."""
     return encode(
         SealedBox(public_key).encrypt(bound_payload(stage, application, name, value))
     )
 
 
-def unseal(private_key, stage, application, name, ciphertext):
+def unseal(
+    private_key: PrivateKey, stage: str, application: str, name: str, ciphertext: str
+) -> str:
     """Decrypt a secret and verify its bound identity and string value."""
     try:
         payload = json.loads(SealedBox(private_key).decrypt(decode(ciphertext, name)))
@@ -240,7 +254,9 @@ def unseal(private_key, stage, application, name, ciphertext):
     return payload["value"]
 
 
-def decrypt_all(stage, application, key_file, root=ROOT):
+def decrypt_all(
+    stage: str, application: str, key_file: str | Path | None, root: Path = ROOT
+) -> dict[str, str]:
     """Decrypt every stored secret for an application using its stage key."""
     data = read_store_file(stage, application, root)
     if data is None or not data["values"]:
@@ -259,7 +275,7 @@ def decrypt_all(stage, application, key_file, root=ROOT):
     return result
 
 
-def keygen(stage, private_key_out, root=ROOT):
+def keygen(stage: str, private_key_out: str | Path, root: Path = ROOT) -> None:
     """Create a stage's key pair; only public.key is written to the repository."""
     public_path = public_key_path(stage, root)
     if public_path.exists():
@@ -271,7 +287,12 @@ def keygen(stage, private_key_out, root=ROOT):
     write_atomic(public_path, encode(key.public_key) + "\n")
 
 
-def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
+def rekey(
+    stage: str,
+    old_key_file: str | Path,
+    new_private_key_out: str | Path,
+    root: Path = ROOT,
+) -> int:
     """Re-encrypt every store for a stage with a new key pair.
 
     Everything is decrypted, re-encrypted and verified in-memory before any file
@@ -307,7 +328,7 @@ def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
     return len(new_stores)
 
 
-def plaintext_properties(content):
+def plaintext_properties(content: bytes) -> Iterator[str]:
     """Keys of sensitive-looking properties that still hold a literal value."""
     for line in content.decode("utf-8", "replace").splitlines():
         key, separator, value = line.partition("=")
@@ -323,7 +344,14 @@ def plaintext_properties(content):
             yield key
 
 
-def check_store(stage, application, root, errors, warnings, expected_key_id=None):
+def check_store(
+    stage: str,
+    application: str,
+    root: Path,
+    errors: list[str],
+    warnings: list[str],
+    expected_key_id: str | None = None,
+) -> None:
     """Validate one application's encrypted store and report template/property issues."""
     label = f"{stage}/{application}"
     try:
@@ -375,7 +403,9 @@ def check_store(stage, application, root, errors, warnings, expected_key_id=None
             )
 
 
-def check(stage=None, application=None, root=ROOT):
+def check(
+    stage: str | None = None, application: str | None = None, root: Path = ROOT
+) -> tuple[list[str], list[str]]:
     """Validate secrets stores without a private key; returns (errors, warnings)."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -408,7 +438,7 @@ def check(stage=None, application=None, root=ROOT):
     return errors, warnings
 
 
-def compare_value(name, actual):
+def compare_value(name: str, actual: str) -> None:
     """Prompt securely for an expected value and compare it without timing leakage."""
     if not sys.stdin.isatty():
         raise ValueError("--compare needs an interactive terminal")
@@ -417,7 +447,7 @@ def compare_value(name, actual):
         raise ValueError(f"{name} does not match the expected value")
 
 
-def read_value(source):
+def read_value(source: str | None) -> str:
     """Read a secret from standard input or prompt twice for confirmation."""
     if source == "-":
         value = sys.stdin.read()
@@ -430,7 +460,7 @@ def read_value(source):
     return value
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
     """Build the argument parser for secret-management subcommands."""
     result = argparse.ArgumentParser(
         prog="python -m deployment secrets",
@@ -481,7 +511,7 @@ def parser():
     return result
 
 
-def run(argv, root=ROOT):
+def run(argv: list[str], root: Path = ROOT) -> None:
     """Execute a secret-management command against the selected repository root."""
     args = parser().parse_args(argv)
     if args.command == "keygen":

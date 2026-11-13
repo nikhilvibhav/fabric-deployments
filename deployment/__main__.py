@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from . import secrets as secrets_cli
 from .artifacts import Repository, valid_url
 from .config import (
+    Values,
     boolean,
     config_files,
     environment,
@@ -25,7 +26,7 @@ LOG = logging.getLogger("camel-deploy")
 DEFAULT_REPOSITORY = "http://10.90.135.56:8081/artifactory/simple"
 
 
-def release_type_for_version(version, requested=None):
+def release_type_for_version(version: str, requested: str | None = None) -> str:
     """Infer a release channel from the version and reject conflicting overrides."""
     inferred = "snapshot" if version.endswith("-SNAPSHOT") else "stable"
     if requested is not None and requested != inferred:
@@ -36,7 +37,7 @@ def release_type_for_version(version, requested=None):
     return inferred
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
     """Build the argument parser for deployment and lifecycle commands."""
     result = argparse.ArgumentParser(description="Fabric deployment CLI")
     result.add_argument(
@@ -71,7 +72,9 @@ def parser():
     return result
 
 
-def prepare_bundle(args, values, workspace):
+def prepare_bundle(
+    args: argparse.Namespace, values: Values, workspace: Path
+) -> tuple[Path, dict[str, str]]:
     """Download and verify the application artifact into a release bundle."""
     bundle = workspace / "bundle"
     bundle.mkdir()
@@ -102,7 +105,7 @@ def prepare_bundle(args, values, workspace):
     return bundle, metadata
 
 
-def execute(args):
+def execute(args: argparse.Namespace) -> None:
     """Validate inputs, then plan or carry out the requested remote operation."""
     args.release_type = release_type_for_version(args.version, args.release_type)
     settings, hosts = environment(args.stage)
@@ -262,7 +265,7 @@ def execute(args):
             )
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     """Dispatch the CLI command and convert expected failures to exit statuses."""
     argv = sys.argv[1:] if argv is None else argv
     commands = {"secrets": secrets_cli.run}
