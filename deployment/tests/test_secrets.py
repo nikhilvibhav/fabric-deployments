@@ -162,9 +162,7 @@ class SecretStoreTests(unittest.TestCase):
         )
 
         with redirect_stdout(io.StringIO()) as output:
-            secrets.run(
-                ["prune", "--stage", "qa", "--keep", "2", "--yes"], self.root
-            )
+            secrets.run(["prune", "--stage", "qa", "--keep", "2", "--yes"], self.root)
         self.assertIn("Removed 2 generation(s)", output.getvalue())
 
         active = current.read_text().strip()

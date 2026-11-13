@@ -281,8 +281,7 @@ def keygen(stage, private_key_out, root=ROOT):
     write_atomic(temporary_dir / "public.key", encode(key.public_key) + "\n")
     write_atomic(
         temporary_dir / "generation.meta",
-        json.dumps({"version": 1, "id": generation, "parent": None}, indent=2)
-        + "\n",
+        json.dumps({"version": 1, "id": generation, "parent": None}, indent=2) + "\n",
     )
     write_private_key(private_key_out, key)
     os.rename(temporary_dir, final_dir)
@@ -295,7 +294,9 @@ def rekey(stage, old_key_file, new_private_key_out, root=ROOT):
     data_dir, store_paths = _active_store_files(stage, root)
     current_file = stage_root / "CURRENT"
     parent_generation = (
-        current_file.read_text(encoding="ascii").strip() if current_file.exists() else None
+        current_file.read_text(encoding="ascii").strip()
+        if current_file.exists()
+        else None
     )
 
     # Read and decrypt every current store before creating or activating anything.
@@ -641,13 +642,17 @@ def run(argv, root=ROOT):
     elif args.command == "prune":
         removed = prune(args.stage, args.keep, delete=args.yes, root=root)
         if not removed:
-            print(f"No generations to prune for {args.stage}; active history is retained.")
+            print(
+                f"No generations to prune for {args.stage}; active history is retained."
+            )
         elif args.yes:
             print(f"Removed {len(removed)} generation(s) from {args.stage}:")
             for generation in removed:
                 print(generation)
         else:
-            print(f"Dry run: would remove {len(removed)} generation(s) from {args.stage}:")
+            print(
+                f"Dry run: would remove {len(removed)} generation(s) from {args.stage}:"
+            )
             for generation in removed:
                 print(generation)
             print("Rerun with --yes to delete these generation directories.")
