@@ -1,77 +1,116 @@
-# Fabric/Invoke deployments
+# Fabric/Invoke Deployments
 
 [![Lint and Unit Tests](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml/badge.svg)](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml)
 
-The Python deployment CLI uses SSH/SFTP through Fabric to deploy JAR artifacts
-from Artifactory together with configuration from this repository. It does not
-build microservices and does not require Jenkins.
+This Python CLI deploys JAR artifacts from Artifactory to existing hosts over SSH/SFTP using Fabric. It deploys configuration from this repository, but it does not build microservices or require Jenkins.
 
-## Runtime and host prerequisites
+## Table of contents
 
-- Use Python 3.11 or newer on a maintained Linux controller or container with
-  network access to Artifactory and the deployment hosts. CentOS 7's system
-  Python is **not** a suitable controller runtime. Do not replace its system
-  Python; use a maintained Jenkins agent/container instead.
-- Target hosts do **not** require Python. They require SSH/SFTP, a POSIX shell,
-  GNU coreutils/find, Java, the `camel` user/group, and their existing service
-  manager. HTTP health checks additionally require `curl` on the target.
-- The SSH account must be able to create/write the application's directory under
-  `/opt/camel` and read existing shared files. Provision this access separately.
-  It also needs noninteractive `sudo -n` permissions for installing/restoring
-  service definitions, changing release/shared group ownership to `camel`,
-  creating log directories, and controlling the chosen service manager.
-  Have operations review these permissions; do not grant blanket passwordless sudo.
-- Provide Jenkins SSH credentials through an SSH agent or SSH configuration.
-  Prepopulate the controller's `~/.ssh/known_hosts` with **verified** host keys.
-  Unknown or changed keys fail closed; host key checking is not disabled.
-  Network/SSH compatibility with CentOS 7 must be checked in the pilot; do not
-  enable obsolete algorithms globally to work around a failed connection.
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+  - [Controller and dependencies](#controller-and-dependencies)
+  - [Target hosts and SSH access](#target-hosts-and-ssh-access)
+- [Install](#install)
+  - [Set up a Jenkins agent](#set-up-a-jenkins-agent)
+  - [Set up a local environment](#set-up-a-local-environment)
+- [Use the CLI](#use-the-cli)
+  - [Plan a deployment](#plan-a-deployment)
+  - [Deploy from Jenkins](#deploy-from-jenkins)
+  - [Use Invoke](#use-invoke)
+  - [Manage deployment lifecycle](#manage-deployment-lifecycle)
+- [Configure deployments](#configure-deployments)
+  - [Parameters and environment variables](#parameters-and-environment-variables)
+  - [Inventories and application files](#inventories-and-application-files)
+  - [Templates and placeholders](#templates-and-placeholders)
+  - [Artifacts](#artifacts)
+- [Manage encrypted secrets](#manage-encrypted-secrets)
+  - [How secret storage works](#how-secret-storage-works)
+  - [Create and manage secrets](#create-and-manage-secrets)
+  - [Check and verify secrets](#check-and-verify-secrets)
+  - [Rekey a stage](#rekey-a-stage)
+  - [Prune old generations](#prune-old-generations)
+  - [Key handling and recovery](#key-handling-and-recovery)
+- [Deployment behavior and recovery](#deployment-behavior-and-recovery)
+- [Contribute and verify](#contribute-and-verify)
+- [License](#license)
 
-## One-time Jenkins agent setup
+## Overview
 
-Install the CLI dependencies once on the Jenkins **agent** that runs the
-deployment job, not on the Jenkins controller or target hosts. Keep the virtual
-environment outside the checkout: this repository is cloned under
-`/tmp/workspace`, which Jenkins may clean or replace. For example, create a
-persistent environment at `/opt/venvs/camel-deploy` as the Jenkins service
-account. Have an administrator create that directory and grant the Jenkins
-account ownership if needed; install Python packages as that account, not with
-`sudo pip`.
+The deployment CLI provides `plan`, `deploy`, `rollback`, `start`, and `stop` actions. It uses stage inventories to select hosts and roles, downloads artifacts on the controller, and deploys releases and rendered configuration to the selected hosts.
 
-Dependencies are managed with [uv](https://docs.astral.sh/uv/): `pyproject.toml`
-declares them and `uv.lock` pins exact versions. Install uv on the agent as the
-Jenkins account, then, after the repository has been cloned to `/tmp/workspace`,
-create the venv from the lockfile:
+The CLI does not switch branches or fetch application source. For the initial QA pilot, confirm SSH and sudo access, artifact selection, service health, and rollback before changing other jobs.
+
+## Prerequisites
+
+### Controller and dependencies
+
+Use Python 3.11 or newer on a maintained Linux controller or container that can reach Artifactory and the deployment hosts. CentOS 7's system Python is not a suitable controller runtime. Do not replace the system Python; use a maintained Jenkins agent or container instead.
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). `pyproject.toml` declares them and `uv.lock` pins exact versions.
+
+### Target hosts and SSH access
+
+Target hosts do not require Python. They require:
+
+- SSH/SFTP and a POSIX shell.
+- GNU coreutils and `find`.
+- Java, the `camel` user/group, and the existing service manager.
+- `curl` on the target if using HTTP health checks.
+
+The SSH account must be able to create and write the application's directory under `/opt/camel`, read existing shared files, and use noninteractive `sudo -n` for installing or restoring service definitions, changing release/shared group ownership to `camel`, creating log directories, and controlling the selected service manager. Provision this access separately and have operations review it; do not grant blanket passwordless sudo.
+
+Provide Jenkins SSH credentials through an SSH agent or SSH configuration. Add **verified** host keys to the controller's `~/.ssh/known_hosts`. Unknown or changed host keys fail closed; host key checking is not disabled. Check SSH/network compatibility with CentOS 7 during the pilot. Do not enable obsolete algorithms globally to work around a failed connection.
+
+## Install
+
+### Set up a Jenkins agent
+
+Install the CLI dependencies on the Jenkins **agent** running the deployment job—not on the Jenkins controller or target hosts.
+
+Keep the virtual environment outside the checkout. The repository may be cloned under `/tmp/workspace`, which Jenkins may clean or replace. For example, use a persistent environment at `/opt/venvs/camel-deploy`, created by an administrator and owned by the Jenkins service account. Install Python packages as that account, not with `sudo pip`.
+
+Install uv on the agent as the Jenkins account. After cloning the repository to `/tmp/workspace`, create the environment from the lockfile:
 
 ```sh
 cd /tmp/workspace
 UV_PROJECT_ENVIRONMENT=/opt/venvs/camel-deploy uv sync --locked --no-dev
 ```
 
-Do this once per persistent agent, and rerun it when `uv.lock` changes. If the agent is ephemeral, bake the
-environment into its image or create it during agent provisioning. A global
-install is possible on a dedicated, managed agent, but an isolated venv avoids
-conflicts with other jobs and OS-managed Python packages.
+Run this once per persistent agent and rerun it when `uv.lock` changes. For ephemeral agents, bake the environment into the image or create it during agent provisioning. A global install is possible on a dedicated, managed agent, but an isolated virtual environment avoids conflicts with other jobs and OS-managed Python packages.
 
-The commands below use Linux shell syntax and assume the repository checkout is
-at `/tmp/workspace`.
+The commands in this README use Linux shell syntax and assume the checkout is at `/tmp/workspace`.
 
-## QA pilot and Jenkins freestyle build step
+### Set up a local environment
 
-The deployment CLI does not switch branches or fetch application source.
-Disable concurrent builds of the deployment job; remote application locks also
-prevent overlapping deployments from this CLI.
+Use the same locked dependency sync from the repository root to create a local environment:
 
-First inspect an offline plan:
+```sh
+uv sync --locked
+```
+
+The project is run from the checkout with `python -m deployment`; it is not installed as a package.
+
+## Use the CLI
+
+### Plan a deployment
+
+Start with an offline plan:
 
 ```sh
 python -m deployment plan \
-  --stage qa --roles cml1 --application authentication-service --version 1.0.0
+  --stage qa \
+  --roles cml1 \
+  --application authentication-service \
+  --version 1.0.0
 ```
 
-`cml1` selects the existing QA host role; verify that it is the intended placement
-before the pilot. The plan validates configuration/templates without SSH or
-Artifactory access; it does not prove remote connectivity or artifact availability.
+The `cml1` role selects an existing QA host role; confirm it is the intended placement before the pilot. Planning validates configuration and templates without SSH or Artifactory access. It does not prove remote connectivity or artifact availability.
+
+A plan can run without a secrets key. It lists secret names and validates templates using placeholders. Supplying a key also checks decryption.
+
+### Deploy from Jenkins
+
+Disable concurrent builds of the deployment job. Remote application locks also prevent overlapping deployments made through this CLI.
 
 In a QA Jenkins job or another runner, invoke the CLI:
 
@@ -81,16 +120,15 @@ set +x
 . /opt/venvs/camel-deploy/bin/activate
 cd /tmp/workspace
 python -m deployment deploy \
-  --stage qa --roles cml1 \
-  --application "$application" --version "$version"
+  --stage qa \
+  --roles cml1 \
+  --application "$application" \
+  --version "$version"
 ```
 
-Do not install tools or modify target hosts automatically during a deployment.
-Store secrets as encrypted values in this repository (see
-[Encrypted secrets](#encrypted-secrets)), not as job parameters or arguments.
-Use the actual existing job parameters for service, version and host roles.
-Only after confirming SSH/sudo access, artifact selection, service health, and
-rollback on this pilot should other jobs be changed.
+Store secrets as encrypted repository values, not as job parameters or command-line arguments. Use the job's actual existing parameters for service, version, and host roles. Do not install tools or modify target hosts automatically during deployment.
+
+### Use Invoke
 
 Optional Invoke entrypoints call the same implementation:
 
@@ -100,193 +138,170 @@ invoke deploy --stage qa --roles cml1 --application authentication-service
 invoke rollback --stage qa --roles cml1 --application authentication-service
 ```
 
-Invoke obtains artifact/version settings from the environment. Use
-`python -m deployment --help` for the full CLI options.
+Invoke obtains artifact and version settings from the environment. For all CLI options, run:
 
-## Existing parameters and inventories
+```sh
+python -m deployment --help
+```
+
+### Manage deployment lifecycle
+
+The CLI supports `rollback`, `stop`, and `start`:
+
+```sh
+python -m deployment rollback --stage qa --roles cml1 --application authentication-service
+python -m deployment stop --stage qa --roles cml1 --application authentication-service
+python -m deployment start --stage qa --roles cml1 --application authentication-service
+```
+
+For a second artifact, use the same `--version` and `--second-artifact true` for lifecycle and rollback commands.
+
+## Configure deployments
+
+### Parameters and environment variables
+
+CLI options override environment variables where applicable. `application` is required either as an option or environment variable. The version defaults to `latest`.
 
 | Input | Behavior |
 | --- | --- |
-| `application`, `version` | CLI options override environment variables; version defaults to `latest`. Nested application names such as `oba/oba-api` are supported. |
-| Release type | Inferred from `version`: only a version ending exactly in `-SNAPSHOT` uses the snapshot repository; all other versions (including `latest`) use the stable repository. `--release-type`, if supplied, must agree with the inferred value. |
-| `deploy_second_artifact` | Strict `true`/`false`; appends the explicit version to both installation directory and service name. `latest` is rejected for this mode. |
-| `java_bin`, `jvm_options` | Existing Java parameters; `java_opts` is an alias when `jvm_options` is absent. One matching pair of wrapping quotes is removed from JVM options. |
-| DB and template variables | Existing lowercase environment variable names are retained. Required secret values have no insecure default. Missing template variables fail before connecting. Prefer [encrypted secrets](#encrypted-secrets) for sensitive values; a name set both as an encrypted secret and an environment variable is rejected. |
-| `--secrets-key` / `CAMEL_SECRETS_KEY_FILE` | Path to the stage's private key file. Required for `deploy` when the application has encrypted secrets. |
+| `application`, `version` | Nested application names such as `oba/oba-api` are supported. |
+| Release type | Inferred from `version`: only versions ending exactly in `-SNAPSHOT` use the snapshot repository; other versions, including `latest`, use the stable repository. If supplied, `--release-type` must agree. |
+| `deploy_second_artifact` | Strict `true`/`false`; appends the explicit version to the installation directory and service name. `latest` is rejected for this mode. |
+| `java_bin`, `jvm_options` | Existing Java parameters. `java_opts` is an alias if `jvm_options` is absent. One matching pair of wrapping quotes is removed from JVM options. |
+| DB and template variables | Existing lowercase environment variable names are retained. Required secret values have no insecure default. Missing template variables fail before connecting. Prefer [encrypted secrets](#manage-encrypted-secrets) for sensitive values. A name supplied both as an encrypted secret and an environment variable is rejected. |
+| `--secrets-key`, `CAMEL_SECRETS_KEY_FILE` | Path to the stage's private key. Required for `deploy` when the application has encrypted secrets. |
 | `--vars-file` | JSON object for additional template values. Environment values override known existing parameters; CLI identity fields cannot be overridden by the file. Keep secret files outside Git with restricted permissions. |
-| `--stage`, `--roles` | Required explicitly; roles are comma-separated (`cml1,cml2`, `app`, etc.). Unknown roles fail instead of deploying to every host. |
-| `--health-url` / `health_url` | Optional target-local HTTP(S) endpoint, e.g. `http://127.0.0.1:8080/actuator/health`. No embedded credentials/query strings. |
+| `--stage`, `--roles` | Required explicitly. Roles are comma-separated, such as `cml1,cml2` or `app`. Unknown roles fail rather than deploying to every host. |
+| `--health-url`, `health_url` | Optional target-local HTTP(S) endpoint, for example `http://127.0.0.1:8080/actuator/health`. URLs must not contain credentials or query strings. |
 
-Environment inventories are JSON files under `deployment/inventories/`. They
-declare host addresses, roles, GELF settings, release retention and service
-manager. Downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`
-and `NO_PROXY` settings.
+Additional artifact-related environment variables are documented in [Artifacts](#artifacts).
 
-`.properties` and `.xml` files are flattened into release `config/`, including
-the 33 existing service XML files that were not previously part of deployment.
-Application properties/logback files fall back to the shared files in `files/`
-when an environment-specific one is absent. Flattened filename collisions are
-rejected rather than overwritten. Top-level `*.shared` files are copied by
-content into `shared/`, without their `.shared` suffix, and their previous
-contents are recorded for rollback. Keystores and other binary files are
-**not automatically uploaded**; provision them separately.
+### Inventories and application files
 
-## Templates and placeholders
+Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, and service manager. Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
 
-Values are substituted with `[[name]]` placeholders, e.g.
-`spring.datasource.password=[[jdbc_database_password]]`. This syntax doesn't
-clash with Spring/logback `${...}` or Camel `{{...}}`, which are resolved by the
-application at runtime and left untouched. Names must be identifiers; unknown
-names fail the deployment; substituted values are never re-rendered. Files
-without placeholders are uploaded byte-for-byte. ERB syntax and `.erb` files
-are not supported.
+`.properties` and `.xml` files are flattened into each release's `config/` directory, including the 33 existing service XML files that were not previously part of deployment. If environment-specific application properties or logback files are missing, the shared files in `files/` are used. Flattened filename collisions fail instead of overwriting files.
 
-## Artifacts
+Top-level `*.shared` files are copied by content into `shared/`, without the `.shared` suffix. Their previous contents are recorded for rollback. Keystores and other binary files are **not automatically uploaded**; provision them separately.
 
-Downloads occur on the controller, once per deployment, then are uploaded to
-each selected host. The existing internal Artifactory base remains the default;
-prefer a canonical HTTPS endpoint via `--repository`/`artifactory_base_url`.
-Set `ARTIFACTORY_TOKEN`, or both `ARTIFACTORY_USERNAME` and
-`ARTIFACTORY_PASSWORD`, through credentials binding when authentication is needed.
-Credentials are restricted to one origin and redirects are rejected. URLs must
-not contain embedded credentials, query strings, or fragments.
+### Templates and placeholders
 
-For a supplied version, the resolver lists its artifact directory and requires
-one matching JAR (excluding sources/javadoc/tests).
-An existing version component in `path_to_jar` is not appended again.
-`latest` requires `maven-metadata.xml` declaring a release/latest version.
-Multiple timestamped snapshots or classifier artifacts are never selected by
-HTML listing order: give the exact URL instead.
+Deployment values use `[[name]]` placeholders, for example:
+
+```properties
+spring.datasource.password=[[jdbc_database_password]]
+```
+
+This syntax does not conflict with Spring/logback `${...}` or Camel `{{...}}` expressions; those are resolved at application runtime and left untouched. Placeholder names must be identifiers. Unknown names fail deployment, and substituted values are not rendered a second time. Files without placeholders are uploaded byte-for-byte. ERB syntax and `.erb` files are not supported.
+
+### Artifacts
+
+Artifact downloads happen on the controller, once per deployment, and are then uploaded to each selected host. The existing internal Artifactory base is the default; prefer a canonical HTTPS endpoint using `--repository` or `artifactory_base_url`.
+
+When authentication is needed, set `ARTIFACTORY_TOKEN`, or both `ARTIFACTORY_USERNAME` and `ARTIFACTORY_PASSWORD`, through credentials binding. Credentials are restricted to one origin and redirects are rejected. URLs must not include credentials, query strings, or fragments.
+
+For an explicit version, the resolver lists its artifact directory and requires exactly one matching JAR, excluding sources, javadoc, and tests. An existing version component in `path_to_jar` is not appended again. `latest` requires `maven-metadata.xml` to declare a release/latest version. The resolver does not choose between multiple timestamped snapshots or classifier artifacts based on HTML listing order; provide the exact URL instead.
+
+Example with an exact artifact URL, SHA-256, and health check:
 
 ```sh
-python -m deployment deploy --stage qa --roles cml1 \
-  --application authentication-service --version 1.0.0 \
+python -m deployment deploy \
+  --stage qa \
+  --roles cml1 \
+  --application authentication-service \
+  --version 1.0.0 \
   --artifact-url https://artifacts.example/repository/authentication-service-1.0.0.jar \
   --sha256 EXPECTED_SHA256 \
   --health-url http://127.0.0.1:8080/actuator/health
 ```
 
-`artifact_url`, `artifact_sha256`, `path_to_jar` and `artifactory_base_url` can
-also be supplied as environment variables. SHA-256 verification is optional;
-the actual digest and resolved URL are always recorded in release metadata.
-Use immutable exact versions/URLs plus expected digests for controlled promotion.
+`artifact_url`, `artifact_sha256`, `path_to_jar`, and `artifactory_base_url` can also be supplied as environment variables. SHA-256 verification is optional; the actual digest and resolved URL are always recorded in release metadata. Use immutable exact versions/URLs plus expected digests for controlled promotion.
 
-## Encrypted secrets
+## Manage encrypted secrets
 
-Secrets live in Git, encrypted per environment with public-key cryptography
-(libsodium sealed boxes via PyNaCl). No Vault, Jenkins credentials, or other
-service is required, so this works with any future CI/CD tool.
+### How secret storage works
 
-- `secrets/STAGE/CURRENT` (committed) selects the active secrets generation.
-  New stages get this file from `keygen`; existing legacy stages without it
-  continue using the old layout until their first rekey.
-- `secrets/STAGE/.generations/GENERATION/` contains that generation's
-  `public.key` and application JSON stores. The public key (committed) encrypts;
-  anyone can add or rotate a value with it but cannot read existing values.
-- The stage **private key** decrypts. It is held only by the deployment
-  controller/operators, outside Git, and is supplied via `--secrets-key PATH`
-  or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key: a QA key cannot
-  decrypt production secrets, and a mismatched key is rejected.
-- Each application JSON store (committed inside the active generation) holds
-  one sealed value per name. Names stay readable for review; values do not.
-  Each value is bound to its stage, application and name, so ciphertext cannot
-  be copied elsewhere. `set` and `unset` modify stores in the active generation.
+Secrets are stored in Git encrypted per environment using libsodium sealed boxes via PyNaCl. No Vault, Jenkins credentials, or other service is required.
 
-Names are the existing template variables, e.g. `jdbc_database_password`,
-`mongodb_password`, or any `[[name]]` used by the application's templates.
-Values are decrypted in memory and rendered into the release
-`config/` files only. Names that end up in service definitions, process
-arguments or paths (`jvm_options`, `java_bin`, `deploy_to`, etc.) are refused.
+- `secrets/STAGE/CURRENT` selects the active generation. New stages get this file from `keygen`; existing legacy stages without it continue using the old layout until their first rekey.
+- `secrets/STAGE/.generations/GENERATION/` contains that generation's `public.key` and application JSON stores. The committed public key encrypts values; anyone can add or rotate a value with it but cannot read existing values.
+- The stage's **private key** decrypts. Keep it outside Git on the deployment controller/operator system and supply it with `--secrets-key PATH` or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key; a QA key cannot decrypt production secrets, and a mismatched key is rejected.
+- Each application JSON store holds one sealed value per name. Names remain readable for review; values do not. Each value is bound to its stage, application, and name, so ciphertext cannot be copied elsewhere. `set` and `unset` modify stores in the active generation.
+
+Secret names are existing template variables, such as `jdbc_database_password`, `mongodb_password`, or any `[[name]]` used by an application's templates. Values are decrypted in memory and rendered only into release `config/` files. Names that would end up in service definitions, process arguments, or paths—including `jvm_options`, `java_bin`, and `deploy_to`—are refused.
+
+### Create and manage secrets
+
+Create the first generation for a stage. Commit `CURRENT` and the generation directory; keep the private key secure and outside the repository:
 
 ```sh
-# One-time per stage (operator): creates the first generation and CURRENT; commit both.
-python -m deployment secrets keygen --stage qa --private-key-out /secure/qa.private.key
-
-# Add or rotate a value (anyone; prompts twice, or use --value-from - for stdin).
-python -m deployment secrets set --stage qa --application authentication-service \
-  --name jdbc_database_password
-python -m deployment secrets list  --stage qa --application authentication-service
-python -m deployment secrets unset --stage qa --application authentication-service \
-  --name jdbc_database_password
-
-# Check names and file structure against templates (anyone; no key needed).
-python -m deployment secrets check
-
-# Check every value decrypts (key holder), then deploy.
-export CAMEL_SECRETS_KEY_FILE=/secure/qa.private.key
-python -m deployment secrets verify --stage qa --application authentication-service
-python -m deployment deploy --stage qa --roles cml1 --application authentication-service
+python -m deployment secrets keygen \
+  --stage qa \
+  --private-key-out /secure/qa.private.key
 ```
 
-### Checking secrets before you push
+Add or rotate a value. The command prompts twice; alternatively, use `--value-from -` to read it from standard input:
 
-Developers hold only the public key and cannot decrypt, so they validate
-secrets with `secrets check`. It needs no key and reports:
+```sh
+python -m deployment secrets set \
+  --stage qa \
+  --application authentication-service \
+  --name jdbc_database_password
+```
 
-- **Errors** (fail the check): malformed or truncated ciphertext, a secret
-  name with no matching `[[name]]` placeholder (e.g. a typo), secrets for an
-  application with no configuration directory, or a stage without `public.key`.
-- **Warnings**: a placeholder that has no encrypted value and must come from
-  the environment or `--vars-file`, or a sensitive-looking property (password,
-  secret, token, API key) that still has a plaintext value in an application
-  that uses encrypted secrets.
+List names without displaying values, or remove a value:
 
-Narrow it with `--stage` and `--application`. CI runs it on every push and PR.
-To run it automatically before each commit, install the hook once:
+```sh
+python -m deployment secrets list \
+  --stage qa \
+  --application authentication-service
+
+python -m deployment secrets unset \
+  --stage qa \
+  --application authentication-service \
+  --name jdbc_database_password
+```
+
+### Check and verify secrets
+
+Developers with only the public key can run `check` without decrypting secrets. It reports:
+
+- **Errors:** malformed or truncated ciphertext; a secret name with no matching `[[name]]` placeholder; secrets for an application with no configuration directory; or a stage without `public.key`.
+- **Warnings:** placeholders without encrypted values that must come from the environment or `--vars-file`; or sensitive-looking properties (password, secret, token, API key) that still contain plaintext in an application that uses encrypted secrets.
+
+Run checks for all stages, or narrow them to a stage and application:
+
+```sh
+python -m deployment secrets check
+python -m deployment secrets check --stage qa --application authentication-service
+```
+
+CI runs this check on every push and pull request. To run it before each commit, install the hook once:
 
 ```sh
 uv tool install pre-commit
 pre-commit install
 ```
 
-Key holders use `secrets verify`, which decrypts every value but prints only
-names. To confirm a stored value is the one you expect without displaying it,
-use `--compare`. It prompts for the expected value and reports only whether it
-matches. It requires an interactive terminal, so it cannot be scripted into CI
-logs.
+Key holders can use `verify` to decrypt values. It prints names only. To compare a value interactively without displaying it, use `--compare`; this requires a terminal and cannot be scripted into CI logs:
 
 ```sh
-python -m deployment secrets verify --stage qa --application authentication-service \
-  --name jdbc_database_password --compare
+export CAMEL_SECRETS_KEY_FILE=/secure/qa.private.key
+
+python -m deployment secrets verify \
+  --stage qa \
+  --application authentication-service
+
+python -m deployment secrets verify \
+  --stage qa \
+  --application authentication-service \
+  --name jdbc_database_password \
+  --compare
 ```
 
-`plan` works without the key: it lists secret names and validates templates
-using placeholders. With the key, it also checks decryption. `deploy` fails
-before connecting to any host when secrets exist and no valid key is supplied.
+### Rekey a stage
 
-### Key handling
-
-- Store private keys with mode `0600` (enforced on Linux), owned by the deploy
-  account, on the controller only. Keep an offline backup per stage; losing a
-  key means re-entering every secret for that stage.
-- Never commit private keys. `.gitignore` excludes `*.private.key` and any
-  `*.key` under `secrets/` except `public.key`, but check before committing.
-- Do not run `set`, `unset`, `rekey`, or `prune` for the same stage concurrently.
-  When rekeying a legacy-layout stage, its old root-level files remain inactive
-  after the switch; `CURRENT` determines which files are active.
-- Prune old generations separately. `--keep` counts the current generation;
-  without `--yes`, the command only previews deletions:
-
-  ```sh
-  python -m deployment secrets prune --stage qa --keep 3
-  python -m deployment secrets prune --stage qa --keep 3 --yes
-  ```
-
-  Pruning follows the generation `parent` history and leaves incomplete or
-  unlinked generations untouched. Keep the corresponding private keys outside
-  Git for any old generation you may need to restore. Pruning removes files
-  from the working tree; it does not erase their ciphertext from Git history.
-- Git history keeps old ciphertext. If a private key leaks, rekeying is not
-  enough: **rotate the actual secret values** (database passwords, etc.) too.
-- Revoking a person's ability to *add* secrets is not needed (encryption-only).
-  Revoking someone who held a private key requires rekeying and rotating values.
-
-#### Rekeying a stage
-
-Run rekey from the repository checkout. Use a new private-key filename that
-doesn't already exist; the command will not overwrite a key. Keep it outside
-the repository and restrict access to it. The example uses QA; substitute the
-stage and paths you intend to rotate.
+Run rekey from the repository checkout. Use a new private-key filename that does not already exist; the command will not overwrite a key. Keep it outside the repository and restrict access. Replace the stage and paths in this QA example as needed:
 
 ```sh
 python -m deployment secrets rekey \
@@ -295,25 +310,20 @@ python -m deployment secrets rekey \
   --private-key-out /secure/qa-2026-11.private.key
 ```
 
-Rekey decrypts every active application store before writing anything. It
-builds and verifies a new generation, then atomically updates `CURRENT` to
-activate it. If the command fails before that switch, the old generation stays
-active; a newly written private key or incomplete temporary generation may
-need inspection.
+Rekey decrypts every active application store before writing anything. It builds and verifies a new generation, then atomically updates `CURRENT` to activate it. If the command fails before that switch, the old generation remains active; inspect any newly written private key or incomplete temporary generation.
 
-Verify the new key against each application before relying on it. `verify`
-decrypts all secrets for the selected application but prints names only:
+Verify the new key against each application before relying on it:
 
 ```sh
 python -m deployment secrets verify \
   --stage qa \
   --application authentication-service \
   --secrets-key /secure/qa-2026-11.private.key
+
 python -m deployment secrets check --stage qa
 ```
 
-After verification, commit `CURRENT` and the generation it names together;
-never commit the private key:
+After verification, commit `CURRENT` and the generation it names together. Never commit the private key:
 
 ```sh
 generation=$(cat secrets/qa/CURRENT)
@@ -321,70 +331,52 @@ git add secrets/qa/CURRENT "secrets/qa/.generations/$generation"
 git diff --cached --stat
 ```
 
-Keep the old private key securely if you may need to restore its generation.
-Pruning that generation without its corresponding private key does not provide
-a usable rollback. If the old key was exposed, rotate the actual secret values
-too; rekeying alone does not invalidate leaked credentials.
+Keep the old private key securely if you may need to restore its generation. If the old key was exposed, rotate the actual secret values too; rekeying alone does not invalidate leaked credentials.
 
-Rendered config files remain plaintext on target hosts (mode `0640`, group
-`camel`). Passwords already committed in plaintext `.properties` files can be
-replaced with `[[name]]` placeholders plus encrypted values. Encrypted secrets
-hold text values only; binary files such as keystores and `kognitio-privateKey`
-are not covered and must be provisioned on hosts separately. Rotate anything
-already committed in plaintext, because Git history retains it.
+### Prune old generations
 
-## Publication, recovery, and lifecycle
-
-Deployments acquire per-application locks on every selected host, then deploy
-sequentially. Each release gets configuration and an audited artifact digest;
-the tool saves the previous `current` target and service definition, installs
-the new definition, atomically switches `current`, restarts the service, and
-checks its process state. If `--health-url` is supplied, HTTP readiness is also
-required, with up to twelve attempts at five-second intervals. Without it,
-**process status alone is not application readiness**.
-
-QA/QE/QT/TST retain Supervisor; other environments retain the existing SysV
-script and `service`/systemd compatibility behavior. This is not a service-manager
-migration. A Supervisor deployment refuses to proceed if a conflicting SysV
-definition remains; resolve that operationally before deploying.
-
-On failure, previously activated hosts and the failed activation host are
-restored in reverse order, including saved service definitions and shared files.
-Rollback failure is reported explicitly and requires manual recovery.
-There is no load-balancer draining, distributed atomic cutover, or guarantee of
-zero downtime. Interrupted/killed controllers may leave locks or partially
-activated releases; inspect each selected host rather than assuming rollback ran.
+Prune generations separately from rekeying. `--keep` counts the current generation. By default, the command only previews what it would delete; add `--yes` to delete those generation directories:
 
 ```sh
-python -m deployment rollback --stage qa --roles cml1 --application authentication-service
-python -m deployment stop --stage qa --roles cml1 --application authentication-service
-python -m deployment start --stage qa --roles cml1 --application authentication-service
+python -m deployment secrets prune --stage qa --keep 3
+python -m deployment secrets prune --stage qa --keep 3 --yes
 ```
 
-For a second artifact, use the same `--version` and `--second-artifact true`
-for lifecycle and rollback commands. Rollback uses the current release's saved
-state and can return to the preceding release. Rollback runs sequentially; if
-it fails midway, inspect all selected hosts.
+Pruning follows the generation `parent` history and leaves incomplete or unlinked generations untouched. Keep corresponding private keys outside Git for any old generation you may need to restore. Pruning removes files from the working tree; it does not remove their ciphertext from Git history.
 
-Retention only prunes releases created by this CLI. At least two are retained,
-and current/previous releases are protected. A pruning failure returns an error
-but leaves the successfully published release active.
+### Key handling and recovery
 
-Lock location: `/opt/camel/APPLICATION/.deploy-lock` (with the version suffix
-for second-artifact deployments). Release state and prior service definitions
-are under `releases/RELEASE_ID/.deployment/`. If a job is interrupted, verify
-that no deployment is still running, inspect state/current/service definitions,
-recover the service as needed, then remove **only the specific empty lock
-directory**. Never delete the installation or releases directory to clear a lock.
-Treat release metadata/backups and controller temporary files as sensitive.
+- Store private keys with mode `0600` (enforced on Linux), owned by the deploy account, on the controller only. Keep an offline backup for each stage; losing a key means re-entering every secret for that stage.
+- Never commit private keys. `.gitignore` excludes `*.private.key` and any `*.key` under `secrets/` except `public.key`; check before committing.
+- Do not run `set`, `unset`, `rekey`, or `prune` concurrently for the same stage.
+- When rekeying a legacy-layout stage, its old root-level files remain inactive after the switch; `CURRENT` determines the active files.
+- If a private key leaks, rekeying alone is not enough: **rotate the actual secret values** (database passwords, etc.) too.
+- Revoking someone’s ability to add secrets is not needed because encryption can be done with the public key. If someone who held a private key must be revoked, rekey and rotate the values.
 
-## Local verification
+Rendered config files remain plaintext on target hosts with mode `0640` and group `camel`. Existing plaintext credentials in `.properties` files can be replaced with `[[name]]` placeholders and encrypted values. Rotate anything already committed in plaintext because Git history retains it. Encrypted secrets hold text values only; binary files such as keystores and `kognitio-privateKey` are not covered and must be provisioned on hosts separately.
+
+## Deployment behavior and recovery
+
+Deployments acquire per-application locks on every selected host, then deploy sequentially. Each release includes configuration and an audited artifact digest. The tool saves the previous `current` target and service definition, installs the new definition, atomically switches `current`, restarts the service, and checks its process state.
+
+If `--health-url` is supplied, HTTP readiness is also required, with up to 12 attempts at five-second intervals. Without it, **process status alone is not application readiness**.
+
+QA, QE, QT, and TST retain Supervisor. Other environments retain the existing SysV script and `service`/systemd compatibility behavior; this is not a service-manager migration. A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
+
+If deployment fails, previously activated hosts and the host whose activation failed are restored in reverse order, including saved service definitions and shared files. Rollback failure is reported explicitly and requires manual recovery. There is no load-balancer draining, distributed atomic cutover, or guarantee of zero downtime. If a controller is interrupted or killed, it may leave locks or partially activated releases; inspect each selected host rather than assuming rollback ran.
+
+For a second artifact, use the same `--version` and `--second-artifact true` for lifecycle and rollback commands. Rollback uses the current release's saved state and can return to the preceding release. Rollback runs sequentially; if it fails midway, inspect all selected hosts.
+
+Release retention prunes only releases created by this CLI. At least two are retained, and current/previous releases are protected. A pruning failure returns an error but leaves the successfully published release active.
+
+The lock is at `/opt/camel/APPLICATION/.deploy-lock`, with the version suffix for second-artifact deployments. Release state and prior service definitions are under `releases/RELEASE_ID/.deployment/`. If a job is interrupted, first verify no deployment is still running; inspect state, `current`, and service definitions; recover the service as needed; then remove **only the specific empty lock directory**. Never delete the installation or releases directory to clear a lock. Treat release metadata, backups, and controller temporary files as sensitive.
+
+## Contribute and verify
+
+Run the test suite from the repository root:
 
 ```sh
 python -m unittest discover -s deployment/tests -v
 ```
 
-These tests exercise template/inventory loading, artifact resolution,
-JAR validation, release preparation, and failure recovery using mocked remote
-connections. They do not deploy to the internal environments or replace the QA
-pilot and operations review.
+The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to internal environments and do not replace the QA pilot or operations review.
