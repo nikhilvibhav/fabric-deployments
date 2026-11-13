@@ -15,6 +15,10 @@ from paramiko import RejectPolicy
 
 from .config import ROOT, Values, render_file
 
+LOG = logging.getLogger("camel-deploy")
+HEALTH_ATTEMPTS = 12
+HEALTH_INTERVAL = 5
+
 
 def q(value: object) -> str:
     """Shell-quote a value before including it in a remote command."""
@@ -53,9 +57,7 @@ class Remote:
             return self.connection.run(command, hide=True, timeout=120, **kwargs)
         except (UnexpectedExit, CommandTimedOut):
             # Surface the operation, but not service output that may contain secrets.
-            logging.getLogger("camel-deploy").error(
-                "Remote command failed on %s: %s", self.connection.host, command
-            )
+            LOG.error("Remote command failed on %s: %s", self.connection.host, command)
             raise
 
     def put(self, content: bytes, path: str) -> None:
@@ -219,13 +221,27 @@ class Remote:
                 return
             if action == "stop" and "ERROR (no such process)" in status.stdout:
                 return
+            LOG.info(
+                "Running %s of %s on %s", action, self.service, self.connection.host
+            )
             self.run(f"sudo -n supervisorctl {action} {q(self.service)}")
         else:
+            LOG.info(
+                "Running %s of %s on %s", action, self.service, self.connection.host
+            )
             self.run(f"sudo -n /sbin/service {q(self.service)} {action}")
 
     def healthy(self) -> None:
         """Wait for the service and optional HTTP endpoint to become healthy."""
-        for attempt in range(12):
+        host = self.connection.host
+        LOG.info(
+            "Checking health of %s on %s (%s; up to %ss)",
+            self.service,
+            host,
+            "process + " + self.health_url if self.health_url else "process only",
+            HEALTH_ATTEMPTS * HEALTH_INTERVAL,
+        )
+        for attempt in range(1, HEALTH_ATTEMPTS + 1):
             if self.supervisor:
                 status = self.run(
                     f"sudo -n supervisorctl status {q(self.service)}", warn=True
@@ -243,9 +259,18 @@ class Remote:
                     warn=True,
                 ).ok
             if okay:
+                LOG.info("%s is healthy on %s", self.service, host)
                 return
-            if attempt < 11:
-                time.sleep(5)
+            if attempt < HEALTH_ATTEMPTS:
+                LOG.info(
+                    "%s not healthy yet on %s (attempt %d/%d); retrying in %ss",
+                    self.service,
+                    host,
+                    attempt,
+                    HEALTH_ATTEMPTS,
+                    HEALTH_INTERVAL,
+                )
+                time.sleep(HEALTH_INTERVAL)
         raise RuntimeError("Service did not become healthy within the startup window")
 
     def load_state(self, release: str) -> dict[str, Any]:
@@ -312,4 +337,5 @@ class Remote:
         for release in releases:
             self.validate_release(release)
             if release not in retained:
+                LOG.info("Removing old release %s on %s", release, self.connection.host)
                 self.run(f"rm -rf -- {q(release)}")

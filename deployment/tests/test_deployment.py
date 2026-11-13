@@ -32,14 +32,12 @@ class ConfigurationTests(unittest.TestCase):
         """Check repository inventories and role-based host selection."""
         counts = {
             "dr": 6,
-            "lst": 1,
             "preprod": 8,
             "production": 7,
             "qa": 4,
             "qe": 2,
             "qs": 2,
             "qt": 4,
-            "tst": 2,
             "vagrant": 1,
         }
         for stage, count in counts.items():
@@ -47,7 +45,7 @@ class ConfigurationTests(unittest.TestCase):
                 settings, hosts = environment(stage)
                 self.assertEqual(len(hosts), count)
                 self.assertEqual(
-                    settings["use_supervisor"], stage in {"qa", "qe", "qt", "tst"}
+                    settings["use_supervisor"], stage in {"qa", "qe", "qt"}
                 )
         _, hosts = environment("preprod")
         self.assertEqual(
@@ -239,14 +237,17 @@ class ArtifactTests(unittest.TestCase):
             repo.resolve("https://repo", "app", "1", ".jar")
 
     def test_download_checksum(self):
-        """Reject a downloaded artifact whose digest differs from the expected value."""
+        """Reject a mismatched download, naming both digests so the cause is clear."""
         repo = Repository()
         repo.open = MagicMock(return_value=io.BytesIO(b"artifact"))
+        actual = hashlib.sha256(b"artifact").hexdigest()
         with (
             tempfile.TemporaryDirectory() as directory,
-            self.assertRaisesRegex(ValueError, "SHA-256 mismatch"),
+            self.assertRaisesRegex(
+                ValueError, f"SHA-256 mismatch: expected bad, downloaded {actual}"
+            ),
         ):
-            repo.download("https://repo/app.jar", Path(directory) / "app.jar", "bad")
+            repo.download("https://repo/app.jar", Path(directory) / "app.jar", "BAD")
 
     def test_artifacts_are_resolved_as_jars(self):
         """Build a bundle from the resolved JAR and preserve its URL and digest."""
@@ -452,6 +453,32 @@ class RemoteTests(unittest.TestCase):
         ):
             self.remote.healthy()
         self.assertEqual(self.remote.run.call_count, 12)
+
+    def test_restart_and_health_progress_are_logged(self):
+        """Log the restart, each failed readiness attempt, and the healthy result."""
+        host = self.remote.connection.host
+        self.remote.run.side_effect = [
+            SimpleNamespace(ok=True, stdout="app RUNNING"),
+            SimpleNamespace(ok=True, stdout=""),
+            SimpleNamespace(ok=False, stdout="app STARTING"),
+            SimpleNamespace(ok=True, stdout="app RUNNING"),
+        ]
+        with (
+            patch("deployment.remote.time.sleep"),
+            self.assertLogs("camel-deploy") as logs,
+        ):
+            self.remote.lifecycle("restart")
+            self.remote.healthy()
+        service = self.remote.service
+        self.assertEqual(
+            [line.removeprefix("INFO:camel-deploy:") for line in logs.output],
+            [
+                f"Running restart of {service} on {host}",
+                f"Checking health of {service} on {host} (process only; up to 60s)",
+                f"{service} not healthy yet on {host} (attempt 1/12); retrying in 5s",
+                f"{service} is healthy on {host}",
+            ],
+        )
 
     def test_paths_outside_releases_cannot_be_pruned_or_rolled_back(self):
         """Reject release paths outside the application's direct release directory."""

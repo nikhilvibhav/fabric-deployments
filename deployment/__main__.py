@@ -97,7 +97,10 @@ def prepare_bundle(
     if not urlsplit(artifact_url).path.lower().endswith(".jar"):
         raise ValueError("The artifact URL must point to a JAR file")
     artifact = workspace / "artifact"
+    LOG.info("Downloading artifact %s", artifact_url)
     digest = repository.download(artifact_url, artifact, args.sha256)
+    if args.sha256:
+        LOG.info("Artifact matches the expected SHA-256")
     metadata = {"artifact_url": artifact_url, "sha256": digest}
     artifact.rename(bundle / (values["application_name"] + ".jar"))
     if (bundle / ".deployment").exists():
@@ -215,6 +218,7 @@ def execute(args: argparse.Namespace) -> None:
                     args.stage, args.application, dict(values, release_path=release)
                 ).items():
                     (config / name).write_bytes(content)
+                LOG.info("Uploading %s to %s", release_id, remote.connection.host)
                 state = remote.prepare(
                     bundle,
                     release,

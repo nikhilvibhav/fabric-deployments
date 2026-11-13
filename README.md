@@ -355,7 +355,7 @@ Deployments acquire per-application locks on every selected host, then deploy se
 
 If `--health-url` is supplied, HTTP readiness is also required, with up to 12 attempts at five-second intervals. Without it, **process status alone is not application readiness**.
 
-QA, QE, QT, and TST retain Supervisor. Other environments retain the existing SysV script and `service`/systemd compatibility behavior; this is not a service-manager migration. A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
+QA, QE, and QT retain Supervisor. Other environments retain the existing SysV script and `service`/systemd compatibility behavior; this is not a service-manager migration. A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
 
 If deployment fails, previously activated hosts and the host whose activation failed are restored in reverse order, including saved service definitions and shared files. Rollback failure is reported explicitly and requires manual recovery. There is no load-balancer draining, distributed atomic cutover, or guarantee of zero downtime. If a controller is interrupted or killed, it may leave locks or partially activated releases; inspect each selected host rather than assuming rollback ran.
 

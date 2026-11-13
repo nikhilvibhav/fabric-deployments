@@ -142,5 +142,10 @@ class Repository:
                 output.write(chunk)
         actual = digest.hexdigest()
         if checksum and actual.lower() != checksum.lower():
-            raise ValueError("Artifact SHA-256 mismatch")
+            raise ValueError(
+                f"Artifact SHA-256 mismatch: expected {checksum.lower()}, "
+                f"downloaded {actual}. Check that --sha256 is from the preprod "
+                "deployment of this version; otherwise the JAR in Artifactory "
+                "changed since then."
+            )
         return actual
