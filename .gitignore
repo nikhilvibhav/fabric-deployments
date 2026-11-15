@@ -16,3 +16,5 @@ __pycache__/
 *.private.key
 secrets/**/*.key
 !secrets/**/public.key
+.coverage
+htmlcov/

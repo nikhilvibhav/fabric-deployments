@@ -15,6 +15,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "coverage>=7.17.3",
     "mypy>=2.4.1",
     "ruff>=0.17.4",
     "types-paramiko>=5.1.0",
@@ -57,3 +58,14 @@ module = [
     "tasks",
 ]
 disallow_untyped_defs = true
+
+[tool.coverage.run]
+branch = true
+source = ["deployment"]
+omit = ["deployment/tests/*"]
+
+[tool.coverage.report]
+# CI fails if branch coverage drops below this; raise it as tests are added.
+fail_under = 80
+show_missing = true
+skip_covered = true

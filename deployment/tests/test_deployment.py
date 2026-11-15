@@ -739,6 +739,60 @@ class OrchestrationTests(unittest.TestCase):
             cli.execute(self.args("plan"))
         remote.assert_not_called()
 
+    def test_plain_http_artifactory_needs_the_stage_setting(self):
+        """Refuse http:// artifact sources unless the inventory allows them."""
+        settings: Settings = {
+            "keep_releases": 1,
+            "use_supervisor": False,
+            "health_timeout": 60,
+            "artifactory_url": "http://artifactory.internal.example:8081/artifactory",
+            "gelf_host": "logs.example",
+        }
+        hosts = [Host("deploy@192.0.2.10", ("app1", "app2"))]
+        with (
+            patch.object(cli, "environment", return_value=(settings, hosts)),
+            patch.dict("os.environ", {"artifactory_base_url": "", "artifact_url": ""}),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            with self.assertRaisesRegex(ValueError, "artifactory_allow_http"):
+                cli.execute(self.args("plan"))
+            settings["artifactory_allow_http"] = True
+            cli.execute(self.args("plan"))
+        self.assertTrue(json.loads(output.getvalue())["artifact"].startswith("http://"))
+
+    def test_plain_http_artifact_url_is_refused_and_allowed_deploy_warns(self):
+        """Apply the stage setting to --artifact-url and warn when deploying."""
+        args = self.args()
+        args.artifact_url = "http://artifactory.internal.example/app-1.jar"
+        settings: Settings = {
+            "keep_releases": 1,
+            "use_supervisor": False,
+            "health_timeout": 60,
+        }
+        with self.assertRaisesRegex(ValueError, "plain HTTP"):
+            cli.check_artifact_scheme(args, settings)
+        settings["artifactory_allow_http"] = True
+        with self.assertLogs("camel-deploy", "WARNING") as logs:
+            cli.check_artifact_scheme(args, settings)
+        self.assertIn("Downloading over plain HTTP", logs.output[0])
+
+    def test_inventory_allow_http_must_be_boolean(self):
+        """Reject a non-boolean artifactory_allow_http setting."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "deployment" / "inventories" / "stage.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "settings": {"artifactory_allow_http": "yes"},
+                        "hosts": [{"address": "h", "roles": ["app1"]}],
+                    }
+                )
+            )
+            with self.assertRaises(ValueError):
+                environment("stage", root)
+
     def test_release_type_is_inferred_from_snapshot_suffix(self):
         """Infer the snapshot release channel from the version suffix."""
         args = self.args("plan")

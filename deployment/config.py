@@ -61,6 +61,8 @@ class Settings(TypedDict):
     artifactory_url: NotRequired[str]
     # Maven group path under the snapshot/release repositories, e.g. com/example
     artifact_group: NotRequired[str]
+    # Permit plain-HTTP artifact downloads (and credentials) for this stage.
+    artifactory_allow_http: NotRequired[bool]
 
 
 def boolean(value: object) -> bool:
@@ -112,6 +114,7 @@ def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
             "use_supervisor",
             "artifactory_url",
             "artifact_group",
+            "artifactory_allow_http",
             "health_timeout",
         }
         or type(supplied_settings.get("keep_releases", 1)) is not int
@@ -119,6 +122,7 @@ def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
         or type(supplied_settings.get("health_timeout", 60)) is not int
         or not 5 <= supplied_settings.get("health_timeout", 60) <= 1800
         or not isinstance(supplied_settings.get("use_supervisor", False), bool)
+        or not isinstance(supplied_settings.get("artifactory_allow_http", False), bool)
         or any(
             name in supplied_settings and not isinstance(supplied_settings[name], str)
             for name in ("gelf_host", "artifactory_url", "artifact_group")

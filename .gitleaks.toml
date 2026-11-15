@@ -1,0 +1,15 @@
+# Secret scanning for CI (gitleaks). Uses the default rules, with these exceptions.
+title = "fabric-deployments"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Sample-only test keys and sealed (encrypted) secret values"
+paths = [
+    # Private keys for the sample stages, committed on purpose so tests can decrypt.
+    '''^deployment/tests/fixtures/[^/]+\.test-key$''',
+    # Values in secret stores are sealed with the stage's public key, not plaintext.
+    '''^secrets/[^/]+/[^/]+\.json$''',
+    '''^secrets/[^/]+/public\.key$''',
+]

@@ -228,7 +228,9 @@ Artifact downloads happen on the controller, once per deployment, and are then u
 }
 ```
 
-With these settings, `1.0.0-SNAPSHOT` resolves under `https://artifactory.example/artifactory/libs-snapshot-local/com/example/APPLICATION/` and `1.0.0` under `.../libs-release-local/com/example/APPLICATION/`. `--repository` (or `artifactory_base_url`) overrides this with a complete repository URL, and `--artifact-url` skips resolution. `plan` and `deploy` fail before connecting if none of these is set. Prefer HTTPS.
+With these settings, `1.0.0-SNAPSHOT` resolves under `https://artifactory.example/artifactory/libs-snapshot-local/com/example/APPLICATION/` and `1.0.0` under `.../libs-release-local/com/example/APPLICATION/`. `--repository` (or `artifactory_base_url`) overrides this with a complete repository URL, and `--artifact-url` skips resolution. `plan` and `deploy` fail before connecting if none of these is set.
+
+Use HTTPS where possible. A plain `http://` repository or artifact URL exposes the JAR and any Artifactory credentials in transit, so it is refused unless the stage's inventory sets `"artifactory_allow_http": true`. Deployments to such a stage log a warning; pin the JAR with `--sha256` there.
 
 When authentication is needed, set `ARTIFACTORY_TOKEN`, or both `ARTIFACTORY_USERNAME` and `ARTIFACTORY_PASSWORD`, through credentials binding. Credentials are restricted to one origin and redirects are rejected. URLs must not include credentials, query strings, or fragments.
 
@@ -418,10 +420,13 @@ Run the test suite from the repository root:
 python -m unittest discover -s deployment/tests -v
 ```
 
-CI also lints, checks formatting and type-checks. Run the same checks locally:
+CI also lints, checks formatting, type-checks, measures branch coverage, audits dependencies and scans every commit for secrets with [gitleaks](https://github.com/gitleaks/gitleaks). Run the same checks locally:
 
 ```sh
 uv run ruff check . && uv run ruff format --check . && uv run mypy
+uv run coverage run -m unittest discover -s deployment/tests && uv run coverage report
 ```
+
+`coverage report` fails if branch coverage drops below `fail_under` in `pyproject.toml` (80%). If gitleaks is installed, `gitleaks git --config .gitleaks.toml .` runs the CI scan; `.gitleaks.toml` exempts only the sample test keys and sealed secret stores.
 
 The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to real environments and do not replace a pilot deployment or operations review.

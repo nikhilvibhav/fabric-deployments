@@ -103,6 +103,25 @@ def repository_base(
     return "/".join(parts)
 
 
+def check_artifact_scheme(args: argparse.Namespace, settings: Settings) -> None:
+    """Refuse plain-HTTP artifact URLs unless the stage's inventory allows them."""
+    source = args.artifact_url or args.repository
+    if urlsplit(source).scheme != "http":
+        return
+    if not settings.get("artifactory_allow_http", False):
+        raise ValueError(
+            f"{source} uses plain HTTP, which would expose the JAR and any "
+            'Artifactory credentials in transit; set "artifactory_allow_http": true '
+            f"in deployment/inventories/{args.stage}.json to allow it"
+        )
+    if args.action == "deploy":
+        LOG.warning(
+            "Downloading over plain HTTP, as allowed for %s; pass --sha256 to "
+            "verify the JAR",
+            args.stage,
+        )
+
+
 def parser() -> argparse.ArgumentParser:
     """Build the argument parser for deployment and lifecycle commands."""
     result = argparse.ArgumentParser(description="Fabric deployment CLI")
@@ -177,12 +196,14 @@ def execute(args: argparse.Namespace) -> None:
     settings, hosts = environment(args.stage)
     selected = select_hosts(hosts, args.roles)
     args.repository = repository_base(args.repository, settings, args.release_type)
-    if args.action in {"plan", "deploy"} and not (args.artifact_url or args.repository):
-        raise ValueError(
-            f"No artifact repository for {args.stage}: set artifactory_url in "
-            f"deployment/inventories/{args.stage}.json, or pass --repository "
-            "or --artifact-url"
-        )
+    if args.action in {"plan", "deploy"}:
+        if not (args.artifact_url or args.repository):
+            raise ValueError(
+                f"No artifact repository for {args.stage}: set artifactory_url in "
+                f"deployment/inventories/{args.stage}.json, or pass --repository "
+                "or --artifact-url"
+            )
+        check_artifact_scheme(args, settings)
     secret_names = sorted(read_store(args.stage, args.application))
     # Plan without a key stays offline-safe; deploy always requires decryption.
     decrypt = args.action == "deploy" or (args.action == "plan" and args.secrets_key)

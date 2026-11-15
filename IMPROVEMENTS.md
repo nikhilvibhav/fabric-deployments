@@ -23,9 +23,7 @@ reached.
 | Area | Item | Effort |
 | --- | --- | --- |
 | Security | [Rotate the credentials that used to be committed](#-security) | Operational |
-| Security | [Refuse to send Artifactory credentials over `http://`](#-security) | Small, needs a policy decision |
-| Security | [Add secret scanning to CI](#-security) | Small |
-| CI | [`shellcheck` and coverage](#-cicd-workflow-githubworkflowstestsyaml) | Small each |
+| CI | [`shellcheck` for `files/camel_init`](#-cicd-workflow-githubworkflowstestsyaml) | Small |
 | Code | [`execute()` is long](#-python-code) | Medium |
 
 ## 🔴 Security
@@ -39,14 +37,13 @@ reached.
    All configuration inherited from Capistrano (`files/<stage>/`, with
    plaintext passwords, a DSA private key and `.jks` keystores), the real
    inventories and secrets, and `lookup-hostnames.sh` were replaced by a
-   sample environment. `scripts/rewrite-history.sh` removed them from Git
-   history, and the rewritten history has been force-pushed.
+   sample environment. Git history was rewritten to start at the first Fabric
+   commit without them, and force-pushed.
    - ❌ **Rotate the credentials.** Old clones, forks and GitHub's cache of
      old commit hashes can still hold them.
-   - ❌ **Add secret scanning to CI** (gitleaks or trufflehog) so new
-     plaintext can't be committed. The sample test keys under
-     `deployment/tests/fixtures/` are intentional and would need an
-     allowlist entry.
+   - ✅ **Secret scanning:** the `secret-scan` CI job runs gitleaks over every
+     commit. `.gitleaks.toml` exempts only the sample test keys and sealed
+     secret stores.
 
 3. ⚠️ **Artifacts and Artifactory credentials can travel over plain HTTP**
    (MEDIUM, accepted risk; earlier review #1 rated it HIGH). The repository
@@ -65,7 +62,7 @@ reached.
    downgraded rather than closed.
 
    Artifactory's own checksums don't matter for verification: the CLI
-   computes the JAR's SHA-256 itself (`deployment/artifacts.py:145`), so
+   computes the JAR's SHA-256 itself (`deployment/artifacts.py:150`), so
    `--sha256` only needs a trusted value from outside the HTTP connection.
 
    Mitigations:
@@ -75,9 +72,11 @@ reached.
      adds nothing. Preprod, prod and DR deploy the same stable build: pass
      the digest from the preprod job log as `--sha256` for prod and DR. A
      mismatch fails before any host changes and names both digests.
-   - ❌ **Refuse to send credentials to an `http://` URL** unless explicitly
-     allowed, or use anonymous read access or a read-only account scoped to
-     the release repositories so leaked credentials can do little.
+   - ✅ **Plain HTTP is opt-in per stage.** `http://` repository and artifact
+     URLs are refused unless the stage's inventory sets
+     `"artifactory_allow_http": true`, and deployments to such stages log a
+     warning. Also consider anonymous read access or a read-only account so
+     credentials sent over HTTP can do little.
    - **Restrict the Artifactory port** with an Azure network security group
      so only the deployment controller's subnet can reach it.
    - **Optional HTTPS:** put a TLS reverse proxy (nginx, or an internal
@@ -107,13 +106,14 @@ reached.
 | ✅ | No `concurrency:` group | Superseded runs of the same branch or PR are cancelled. |
 | ✅ | Lint target missed `tasks.py` | Ruff checks and format-checks the whole repository. |
 | ✅ | No CLI smoke test | The `secrets` job runs an offline `plan` for every application under `files/`, using each stage's first role. |
-| ❌ | Shell scripts aren't linted | Run `shellcheck` on `files/camel_init` (runs as root on targets) and `scripts/rewrite-history.sh`. `camel_init` contains `[[name]]` placeholders, so render it first or exclude those lines. |
-| ❌ | Coverage isn't measured | Run `coverage run -m unittest` and upload the report or enforce a floor. |
+| ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 80% (`fail_under` in `pyproject.toml`). |
+| ✅ | No secret scanning | The `secret-scan` job runs a checksum-verified gitleaks over the full history. |
+| ❌ | `files/camel_init` isn't linted | Run `shellcheck` on it (it runs as root on targets). It contains `[[name]]` placeholders, so render it first or exclude those lines. |
 
 ## 🟡 Python code
 
 - ✅ **Fixed: `unseal` errors showed a traceback.** The `secrets` subcommand
-  now catches `TypeError` (`deployment/__main__.py:359`).
+  now catches `TypeError` (`deployment/__main__.py:382`).
 - ✅ **Fixed: missing `ARTIFACTORY_PASSWORD` raised `KeyError`.** It is now a
   `ValueError` naming the missing variable.
 - ✅ **Fixed: `config_files()` ran once per host.** Configuration and shared
@@ -162,14 +162,15 @@ the code on 2026-11-15.
 | --- | --- | --- | --- | --- |
 | 1 | 🟠 HIGH | 8/10 | Default Artifactory URL is HTTP and SHA-256 verification is optional, so a JAR could be replaced in transit. | ⚠️ Accepted risk, downgraded to MEDIUM. There is no default URL any more, but the real Artifactory is HTTP-only. Mitigations in [Security #3](#-security). |
 | 2 | 🟡 MEDIUM | 8/10 | `sterr_logfile_backups` misspelled in `files/camel_supervisord`, so Supervisor could reject the config and trigger a rollback. | ✅ Fixed: `files/camel_supervisord:19` reads `stderr_logfile_backups`. |
-| 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed: `valid_url()` rejects user info, queries and fragments (`deployment/artifacts.py:24`), and `--health-url` is validated with it (`deployment/__main__.py:207`). |
+| 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed: `valid_url()` rejects user info, queries and fragments (`deployment/artifacts.py:24`), and `--health-url` is validated with it (`deployment/__main__.py:228`). |
 | 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ✅ Fixed: see [Security #4](#-security). |
 | 5 | 🟡 MEDIUM | 8/10 | `[[pca_api_key]]` isn't among the environment keys, so rendering fails unless it's supplied via a vars file or an encrypted secret. | ✅ Resolved: the apps that used it had it encrypted, and their configuration has since been removed. `secrets check` warns about any placeholder with no encrypted value. |
 
 ## Suggested order
 
 1. Rotate every credential that was ever committed.
-2. Add secret scanning to CI.
-3. Refuse Artifactory credentials over HTTP (or switch to anonymous or
-   read-only access), and pin prod and DR deployments to the preprod digest.
-4. Split `execute()`, then add coverage and shellcheck.
+2. Set `"artifactory_allow_http": true` only on stages that need it, use
+   anonymous or read-only Artifactory access there, and pin prod and DR
+   deployments to the preprod digest.
+3. Split `execute()`, raising the coverage floor as `remote.py` (64%) gains
+   tests, then shellcheck `files/camel_init`.
