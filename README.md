@@ -178,7 +178,7 @@ Additional artifact-related environment variables are documented in [Artifacts](
 
 ### Inventories and application files
 
-Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, and service manager. Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
+Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, service manager, and the Artifactory location (`artifactory_url`, `artifact_group`). Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
 
 `.properties` and `.xml` files are flattened into each release's `config/` directory. If environment-specific application properties or logback files are missing, the shared files in `files/` are used. Flattened filename collisions fail instead of overwriting files.
 
@@ -219,7 +219,16 @@ This syntax does not conflict with Spring/logback `${...}` or Camel `{{...}}` ex
 
 ### Artifacts
 
-Artifact downloads happen on the controller, once per deployment, and are then uploaded to each selected host. The existing internal Artifactory base is the default; prefer a canonical HTTPS endpoint using `--repository` or `artifactory_base_url`.
+Artifact downloads happen on the controller, once per deployment, and are then uploaded to each selected host. There is no built-in repository. Each stage's inventory names its Artifactory, and the CLI picks the snapshot or release repository from the version:
+
+```json
+"settings": {
+  "artifactory_url": "https://artifactory.example/artifactory",
+  "artifact_group": "com/example"
+}
+```
+
+With these settings, `1.0.0-SNAPSHOT` resolves under `https://artifactory.example/artifactory/libs-snapshot-local/com/example/APPLICATION/` and `1.0.0` under `.../libs-release-local/com/example/APPLICATION/`. `--repository` (or `artifactory_base_url`) overrides this with a complete repository URL, and `--artifact-url` skips resolution. `plan` and `deploy` fail before connecting if none of these is set. Prefer HTTPS.
 
 When authentication is needed, set `ARTIFACTORY_TOKEN`, or both `ARTIFACTORY_USERNAME` and `ARTIFACTORY_PASSWORD`, through credentials binding. Credentials are restricted to one origin and redirects are rejected. URLs must not include credentials, query strings, or fragments.
 

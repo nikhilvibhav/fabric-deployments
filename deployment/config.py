@@ -55,6 +55,10 @@ class Settings(TypedDict):
     keep_releases: int
     use_supervisor: bool
     gelf_host: NotRequired[str]
+    # Artifactory root, e.g. https://artifactory.example/artifactory
+    artifactory_url: NotRequired[str]
+    # Maven group path under the snapshot/release repositories, e.g. com/example
+    artifact_group: NotRequired[str]
 
 
 def boolean(value: object) -> bool:
@@ -99,16 +103,25 @@ def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
     supplied_settings = document["settings"]
     if (
         not isinstance(supplied_settings, dict)
-        or set(supplied_settings) - {"gelf_host", "keep_releases", "use_supervisor"}
+        or set(supplied_settings)
+        - {
+            "gelf_host",
+            "keep_releases",
+            "use_supervisor",
+            "artifactory_url",
+            "artifact_group",
+        }
         or type(supplied_settings.get("keep_releases", 1)) is not int
         or supplied_settings.get("keep_releases", 1) < 1
         or not isinstance(supplied_settings.get("use_supervisor", False), bool)
-        or (
-            "gelf_host" in supplied_settings
-            and not isinstance(supplied_settings["gelf_host"], str)
+        or any(
+            name in supplied_settings and not isinstance(supplied_settings[name], str)
+            for name in ("gelf_host", "artifactory_url", "artifact_group")
         )
     ):
         raise ValueError(f"Invalid environment settings in {path.name}")
+    if "artifact_group" in supplied_settings:
+        relative_path(supplied_settings["artifact_group"], "artifact_group")
     settings: Settings = {
         "keep_releases": 1,
         "use_supervisor": False,

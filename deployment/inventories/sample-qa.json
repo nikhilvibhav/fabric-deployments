@@ -1,5 +1,7 @@
 {
   "settings": {
+    "artifactory_url": "https://artifactory.example/artifactory",
+    "artifact_group": "com/example",
     "keep_releases": 3,
     "use_supervisor": true,
     "gelf_host": "logs.sample-qa.example"

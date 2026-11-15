@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from . import secrets as secrets_cli
 from .artifacts import Repository, valid_url
 from .config import (
+    Settings,
     Values,
     boolean,
     config_files,
@@ -39,7 +40,6 @@ from .config import (
 from .secrets import KEY_ENV, decrypt_all, read_store
 
 LOG = logging.getLogger("camel-deploy")
-DEFAULT_REPOSITORY = "http://10.90.135.56:8081/artifactory/simple"
 # ANSI colour codes for level names; messages stay uncoloured.
 LEVEL_COLOURS = {
     logging.DEBUG: "2",
@@ -88,6 +88,21 @@ def release_type_for_version(version: str, requested: str | None = None) -> str:
     return inferred
 
 
+def repository_base(
+    repository: str | None, settings: Settings, release_type: str
+) -> str | None:
+    """Return --repository, or the stage's snapshot/release repository from its inventory."""
+    if repository:
+        return repository
+    if "artifactory_url" not in settings:
+        return None
+    name = "libs-snapshot-local" if release_type == "snapshot" else "libs-release-local"
+    parts = [settings["artifactory_url"].rstrip("/"), name]
+    if "artifact_group" in settings:
+        parts.append(settings["artifact_group"])
+    return "/".join(parts)
+
+
 def parser() -> argparse.ArgumentParser:
     """Build the argument parser for deployment and lifecycle commands."""
     result = argparse.ArgumentParser(description="Fabric deployment CLI")
@@ -113,7 +128,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--vars-file")
     result.add_argument("--artifact-url", default=os.environ.get("artifact_url"))
     result.add_argument("--sha256", default=os.environ.get("artifact_sha256"))
-    result.add_argument("--repository", default=os.environ.get("artifactory_base_url"))
+    result.add_argument(
+        "--repository",
+        default=os.environ.get("artifactory_base_url"),
+        help="Repository to resolve versions in (default: from the stage inventory)",
+    )
     result.add_argument("--health-url", default=os.environ.get("health_url"))
     result.add_argument(
         "--secrets-key",
@@ -130,17 +149,10 @@ def prepare_bundle(
     bundle = workspace / "bundle"
     bundle.mkdir()
     repository = Repository()
-    release_type = release_type_for_version(args.version, args.release_type)
-    base = args.repository or (
-        DEFAULT_REPOSITORY
-        + (
-            "/libs-snapshot-local/com/rmg"
-            if release_type == "snapshot"
-            else "/libs-release-local/com/rmg"
-        )
-    )
+    if not args.artifact_url and not args.repository:
+        raise ValueError("Pass --artifact-url or --repository")
     artifact_url = args.artifact_url or repository.resolve(
-        base,
+        args.repository,
         os.environ.get("path_to_jar") or values["application"],
         args.version,
         ".jar",
@@ -164,6 +176,13 @@ def execute(args: argparse.Namespace) -> None:
     args.release_type = release_type_for_version(args.version, args.release_type)
     settings, hosts = environment(args.stage)
     selected = select_hosts(hosts, args.roles)
+    args.repository = repository_base(args.repository, settings, args.release_type)
+    if args.action in {"plan", "deploy"} and not (args.artifact_url or args.repository):
+        raise ValueError(
+            f"No artifact repository for {args.stage}: set artifactory_url in "
+            f"deployment/inventories/{args.stage}.json, or pass --repository "
+            "or --artifact-url"
+        )
     secret_names = sorted(read_store(args.stage, args.application))
     # Plan without a key stays offline-safe; deploy always requires decryption.
     decrypt = args.action == "deploy" or (args.action == "plan" and args.secrets_key)
@@ -201,6 +220,7 @@ def execute(args: argparse.Namespace) -> None:
                     "hosts": selected,
                     "version": args.version,
                     "release_type": args.release_type,
+                    "artifact": args.artifact_url or args.repository,
                     "deploy_to": values["deploy_to"],
                     "service_manager": "supervisor"
                     if settings["use_supervisor"]

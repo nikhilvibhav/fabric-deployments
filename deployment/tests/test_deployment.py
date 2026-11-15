@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 from deployment import __main__ as cli
 from deployment.artifacts import Repository
 from deployment.config import (
+    Host,
+    Settings,
     boolean,
     config_files,
     environment,
@@ -46,6 +48,59 @@ class ConfigurationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Unknown roles"):
             select_hosts(hosts, "app9")
+
+    def test_repository_comes_from_inventory_unless_overridden(self):
+        """Build the snapshot/release repository from inventory settings."""
+        settings: Settings = {
+            "keep_releases": 1,
+            "use_supervisor": False,
+            "artifactory_url": "https://artifactory.example/artifactory/",
+            "artifact_group": "com/example",
+        }
+        self.assertEqual(
+            cli.repository_base(None, settings, "snapshot"),
+            "https://artifactory.example/artifactory/libs-snapshot-local/com/example",
+        )
+        self.assertEqual(
+            cli.repository_base(None, settings, "stable"),
+            "https://artifactory.example/artifactory/libs-release-local/com/example",
+        )
+        self.assertEqual(
+            cli.repository_base("https://other/repo", settings, "stable"),
+            "https://other/repo",
+        )
+        del settings["artifact_group"]
+        self.assertEqual(
+            cli.repository_base(None, settings, "stable"),
+            "https://artifactory.example/artifactory/libs-release-local",
+        )
+        self.assertIsNone(
+            cli.repository_base(
+                None, {"keep_releases": 1, "use_supervisor": False}, "stable"
+            )
+        )
+
+    def test_inventory_artifact_group_must_be_a_relative_path(self):
+        """Reject an artifact group that could escape the repository path."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "deployment" / "inventories" / "stage.json"
+            path.parent.mkdir(parents=True)
+            for group, valid in (("com/example", True), ("../etc", False), (7, False)):
+                with self.subTest(group=group):
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "settings": {"artifact_group": group},
+                                "hosts": [{"address": "h", "roles": ["app1"]}],
+                            }
+                        )
+                    )
+                    if valid:
+                        environment("stage", root)
+                    else:
+                        with self.assertRaises(ValueError):
+                            environment("stage", root)
 
     def test_jenkins_aliases_nested_application_and_second_artifact(self):
         """Verify legacy environment aliases and versioned application paths."""
@@ -276,6 +331,8 @@ class ArtifactTests(unittest.TestCase):
                     "service",
                     "--version",
                     "1.0.0",
+                    "--repository",
+                    "https://repo/libs-release-local/com/example",
                 ]
             )
             repo = Repository()
@@ -294,7 +351,7 @@ class ArtifactTests(unittest.TestCase):
                     Path(directory),
                 )
             repo.resolve.assert_called_once_with(
-                cli.DEFAULT_REPOSITORY + "/libs-release-local/com/rmg",
+                "https://repo/libs-release-local/com/example",
                 "service",
                 "1.0.0",
                 ".jar",
@@ -617,7 +674,24 @@ class OrchestrationTests(unittest.TestCase):
         plan = json.loads(output.getvalue())
         self.assertEqual(len(plan["hosts"]), 2)
         self.assertEqual(plan["release_type"], "stable")
+        self.assertEqual(
+            plan["artifact"],
+            "https://artifactory.example/artifactory/libs-release-local/com/example",
+        )
         self.assertNotIn("variables", plan)
+
+    def test_plan_fails_without_an_artifact_repository(self):
+        """Fail before connecting when no inventory, option or URL names a repository."""
+        settings = {"keep_releases": 1, "use_supervisor": False}
+        hosts = [Host("deploy@192.0.2.10", ("app1", "app2"))]
+        with (
+            patch.object(cli, "environment", return_value=(settings, hosts)),
+            patch.dict("os.environ", {"artifactory_base_url": "", "artifact_url": ""}),
+            patch("deployment.remote.Remote") as remote,
+            self.assertRaisesRegex(ValueError, "set artifactory_url in"),
+        ):
+            cli.execute(self.args("plan"))
+        remote.assert_not_called()
 
     def test_release_type_is_inferred_from_snapshot_suffix(self):
         """Infer the snapshot release channel from the version suffix."""
