@@ -1,6 +1,6 @@
 # Fabric/Invoke Deployments
 
-[![Lint and Unit Tests](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml/badge.svg)](https://github.com/nikhilvibhav/capistrano-migration/actions/workflows/tests.yaml)
+[![Lint and Unit Tests](https://github.com/nikhilvibhav/fabric-deployments/actions/workflows/tests.yaml/badge.svg)](https://github.com/nikhilvibhav/fabric-deployments/actions/workflows/tests.yaml)
 
 This Python CLI deploys JAR artifacts from Artifactory to existing hosts over SSH/SFTP using Fabric. It deploys configuration from this repository, but it does not build microservices or require Jenkins.
 
@@ -178,7 +178,7 @@ Additional artifact-related environment variables are documented in [Artifacts](
 
 ### Inventories and application files
 
-Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, service manager, and the Artifactory location (`artifactory_url`, `artifact_group`). Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
+Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, service manager, health-check timeout (`health_timeout` in seconds, 5–1800, default 60), and the Artifactory location (`artifactory_url`, `artifact_group`). Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
 
 `.properties` and `.xml` files are flattened into each release's `config/` directory. If environment-specific application properties or logback files are missing, the shared files in `files/` are used. Flattened filename collisions fail instead of overwriting files.
 
@@ -398,7 +398,7 @@ ansiColor('xterm') {
 
 `NO_COLOR=1` turns colour off everywhere.
 
-If `--health-url` is supplied, HTTP readiness is also required, with up to 12 attempts at five-second intervals. Without it, **process status alone is not application readiness**.
+Health is checked every five seconds until the stage's `health_timeout` (default 60 seconds) runs out. If `--health-url` is supplied, HTTP readiness is also required. Without it, **process status alone is not application readiness**.
 
 Each inventory chooses its service manager: `"use_supervisor": true` (as in `sample-qa`) uses Supervisor, otherwise the SysV script and `service`/systemd compatibility behavior are used (as in `sample-prod`). A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
 

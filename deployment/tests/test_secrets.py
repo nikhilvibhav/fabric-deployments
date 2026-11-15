@@ -392,7 +392,7 @@ class DeploymentIntegrationTests(unittest.TestCase):
                 "app",
                 "1",
                 False,
-                {"keep_releases": 1, "use_supervisor": False},
+                {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
                 environ={"jdbc_database_password": "old"},
                 secret_values={"jdbc_database_password": "new"},
             )

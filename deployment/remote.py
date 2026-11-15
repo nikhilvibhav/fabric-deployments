@@ -28,8 +28,9 @@ from paramiko import RejectPolicy
 from .config import ROOT, Values, render_file
 
 LOG = logging.getLogger("camel-deploy")
-HEALTH_ATTEMPTS = 12
+# Seconds between health checks; the stage's health_timeout sets how many run.
 HEALTH_INTERVAL = 5
+DEFAULT_HEALTH_TIMEOUT = 60
 
 
 def q(value: object) -> str:
@@ -46,6 +47,7 @@ class Remote:
         values: Values,
         supervisor: bool,
         health_url: str | None = None,
+        health_timeout: int = DEFAULT_HEALTH_TIMEOUT,
     ) -> None:
         """Configure the SSH connection and service details for a host."""
         self.connection = Connection(host, connect_timeout=20)
@@ -54,6 +56,7 @@ class Remote:
         self.values = values
         self.supervisor = supervisor
         self.health_url = health_url
+        self.health_attempts = max(1, -(-health_timeout // HEALTH_INTERVAL))
         self.base = values["deploy_to"]
         self.service = values["application_execute"]
         self.service_file = (
@@ -251,9 +254,9 @@ class Remote:
             self.service,
             host,
             "process + " + self.health_url if self.health_url else "process only",
-            HEALTH_ATTEMPTS * HEALTH_INTERVAL,
+            self.health_attempts * HEALTH_INTERVAL,
         )
-        for attempt in range(1, HEALTH_ATTEMPTS + 1):
+        for attempt in range(1, self.health_attempts + 1):
             if self.supervisor:
                 status = self.run(
                     f"sudo -n supervisorctl status {q(self.service)}", warn=True
@@ -273,13 +276,13 @@ class Remote:
             if okay:
                 LOG.info("%s is healthy on %s", self.service, host)
                 return
-            if attempt < HEALTH_ATTEMPTS:
+            if attempt < self.health_attempts:
                 LOG.info(
                     "%s not healthy yet on %s (attempt %d/%d); retrying in %ss",
                     self.service,
                     host,
                     attempt,
-                    HEALTH_ATTEMPTS,
+                    self.health_attempts,
                     HEALTH_INTERVAL,
                 )
                 time.sleep(HEALTH_INTERVAL)

@@ -56,7 +56,12 @@ class Repository:
         if os.environ.get("ARTIFACTORY_TOKEN"):
             self.headers["Authorization"] = f"Bearer {os.environ['ARTIFACTORY_TOKEN']}"
         elif os.environ.get("ARTIFACTORY_USERNAME"):
-            password = os.environ["ARTIFACTORY_PASSWORD"]
+            password = os.environ.get("ARTIFACTORY_PASSWORD")
+            if not password:
+                raise ValueError(
+                    "ARTIFACTORY_USERNAME is set but ARTIFACTORY_PASSWORD is not; "
+                    "set both, or use ARTIFACTORY_TOKEN"
+                )
             credentials = f"{os.environ['ARTIFACTORY_USERNAME']}:{password}".encode()
             self.headers["Authorization"] = (
                 "Basic " + base64.b64encode(credentials).decode()

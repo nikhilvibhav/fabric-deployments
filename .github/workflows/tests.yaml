@@ -6,24 +6,34 @@ on:
     pull_request:
         branches: [main]
 
+# Least privilege: jobs only read the repository.
+permissions:
+    contents: read
+
+# Cancel superseded runs of the same branch or pull request.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+# Actions are pinned to commit SHAs; Dependabot (.github/dependabot.yml) bumps them.
 jobs:
     lint:
         runs-on: ubuntu-latest
 
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v7
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Set up uv
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
                   enable-cache: true
 
             - name: Run Ruff
-              run: uv run --locked ruff check deployment
+              run: uv run --locked ruff check .
 
             - name: Check code formatting
-              run: uv run --locked ruff format --check deployment
+              run: uv run --locked ruff format --check .
 
             - name: Type check
               run: uv run --locked mypy
@@ -33,15 +43,45 @@ jobs:
 
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v7
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Set up uv
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
                   enable-cache: true
 
             - name: Check encrypted secrets
               run: uv run --locked --no-dev python -m deployment secrets check
+
+            - name: Plan every configured application offline
+              run: |
+                  for dir in files/*/*/; do
+                      stage=$(basename "$(dirname "$dir")")
+                      application=$(basename "$dir")
+                      role=$(jq -r '.hosts[0].roles[0]' "deployment/inventories/$stage.json")
+                      echo "plan $stage/$application ($role)"
+                      uv run --locked --no-dev python -m deployment plan \
+                          --stage "$stage" --roles "$role" \
+                          --application "$application" --version 1.0.0 >/dev/null
+                  done
+
+    audit:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Set up uv
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+              with:
+                  enable-cache: true
+
+            - name: Audit locked runtime dependencies for known vulnerabilities
+              run: |
+                  uv export --locked --no-dev --no-emit-project --format requirements-txt \
+                      -o "$RUNNER_TEMP/requirements.txt"
+                  uvx pip-audit --disable-pip -r "$RUNNER_TEMP/requirements.txt"
 
     test:
         needs: lint
@@ -51,10 +91,10 @@ jobs:
                 python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
         steps:
             - name: Checkout repository
-              uses: actions/checkout@v7
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Set up uv with Python ${{ matrix.python-version }}
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
               with:
                   python-version: ${{ matrix.python-version }}
                   enable-cache: true

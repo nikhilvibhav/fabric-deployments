@@ -1,5 +1,5 @@
 [project]
-name = "capistrano-migration"
+name = "fabric-deployments"
 version = "0.1.0"
 description = "In progress deployment using fabric/invoke and python; replaces the current capistrano deployment"
 readme = "README.md"

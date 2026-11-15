@@ -247,13 +247,20 @@ def execute(args: argparse.Namespace) -> None:
     try:
         # Acquire every selected host lock before publishing any release.
         for host in selected:
-            remote = Remote(host, values, settings["use_supervisor"], args.health_url)
+            remote = Remote(
+                host,
+                values,
+                settings["use_supervisor"],
+                args.health_url,
+                settings["health_timeout"],
+            )
             remotes.append(remote)
             LOG.info("Acquiring deployment lock on %s", host)
             remote.lock()
         if args.action != "deploy":
-            states = []
             if args.action == "rollback":
+                # Check every host can roll back before restoring any of them.
+                states = []
                 for remote in remotes:
                     current = remote.current()
                     if not current:
@@ -262,17 +269,15 @@ def execute(args: argparse.Namespace) -> None:
                     if not state["previous"]:
                         raise ValueError("No previous release available")
                     states.append((remote, current, state))
-            for remote in remotes:
-                if args.action == "rollback":
-                    _, current, state = next(
-                        item for item in states if item[0] is remote
-                    )
+                for remote, current, state in states:
                     remote.restore(current, state)
-                else:
+                    LOG.info("rollback succeeded on %s", remote.connection.host)
+            else:
+                for remote in remotes:
                     remote.lifecycle(args.action)
                     if args.action == "start":
                         remote.healthy()
-                LOG.info("%s succeeded on %s", args.action, remote.connection.host)
+                    LOG.info("%s succeeded on %s", args.action, remote.connection.host)
             return
         release_id = (
             datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -281,21 +286,18 @@ def execute(args: argparse.Namespace) -> None:
         with tempfile.TemporaryDirectory(prefix="camel-deploy-") as temporary:
             workspace = Path(temporary)
             bundle, metadata = prepare_bundle(args, values, workspace)
+            # Release paths are deliberately identical on every selected host, so
+            # configuration is rendered once for all of them.
+            config = bundle / "config"
+            config.mkdir(exist_ok=True)
+            for name, content in config_files(
+                args.stage, args.application, dict(values, release_path=release)
+            ).items():
+                (config / name).write_bytes(content)
+            shared = shared_files(args.stage, args.application)
             for remote in remotes:
-                # Release paths are deliberately identical on every selected host.
-                config = bundle / "config"
-                config.mkdir(exist_ok=True)
-                for name, content in config_files(
-                    args.stage, args.application, dict(values, release_path=release)
-                ).items():
-                    (config / name).write_bytes(content)
                 LOG.info("Uploading %s to %s", release_id, remote.connection.host)
-                state = remote.prepare(
-                    bundle,
-                    release,
-                    metadata,
-                    shared_files(args.stage, args.application),
-                )
+                state = remote.prepare(bundle, release, metadata, shared)
                 activated.append((remote, release, state))
                 LOG.info("Publishing %s on %s", release_id, remote.connection.host)
                 remote.activate(release)

@@ -23,15 +23,10 @@ reached.
 | Area | Item | Effort |
 | --- | --- | --- |
 | Security | [Rotate the credentials that used to be committed](#-security) | Operational |
-| Security | [Refuse to send Artifactory credentials over `http://`](#-security) | Small |
+| Security | [Refuse to send Artifactory credentials over `http://`](#-security) | Small, needs a policy decision |
 | Security | [Add secret scanning to CI](#-security) | Small |
-| CI | [`permissions:`, SHA-pinned actions, Dependabot, `concurrency:`](#-cicd-workflow-githubworkflowstestsyaml) | Small |
-| CI | [`pip-audit`, `shellcheck`, coverage, full-repo ruff, plan smoke test](#-cicd-workflow-githubworkflowstestsyaml) | Small each |
-| Code | [Missing `ARTIFACTORY_PASSWORD` raises `KeyError`](#-python-code) | Small |
-| Code | [Config rendered once per host; quadratic rollback lookup](#-python-code) | Small |
-| Code | [`execute()` is 178 lines](#-python-code) | Medium |
-| Code | [Health-check timing is not configurable per stage](#-python-code) | Small |
-| Housekeeping | [README badge and project name use the old repository name](#-nice-to-have) | Trivial |
+| CI | [`shellcheck` and coverage](#-cicd-workflow-githubworkflowstestsyaml) | Small each |
+| Code | [`execute()` is long](#-python-code) | Medium |
 
 ## 🔴 Security
 
@@ -105,38 +100,31 @@ reached.
 | ✅ | CI triggered on `main` while the default branch was `chore/fabric-deployment` | `main` is now the default and only branch. |
 | ✅ | Ruff was unpinned | Ruff and mypy are dev dependencies pinned in `uv.lock`; CI runs them with `uv run --locked`. |
 | ✅ | Only direct dependencies were pinned | `uv.lock` pins every dependency with SHA-256 hashes, and `--locked` fails if it is out of date. |
-| ❌ | No `permissions:` block | Add `permissions: contents: read` at the top level (least privilege). |
-| ❌ | Actions referenced by tag (`@v7`) | Pin `actions/checkout` and `astral-sh/setup-uv` to commit SHAs and let Dependabot bump them. This is a supply-chain risk for a repo that handles deploy secrets. |
-| ❌ | No Dependabot | Add `.github/dependabot.yml` for the `uv` and `github-actions` ecosystems. |
-| ❌ | No vulnerability scanning | Add a job running `uv export --no-dev --format requirements-txt > requirements.txt && uvx pip-audit -r requirements.txt`. |
-| ❌ | No `concurrency:` group | Add one with `cancel-in-progress: true` for PR refs. |
-| ❌ | Shell scripts aren't linted | Run `shellcheck` on `files/camel_init` (runs as root on targets) and `scripts/rewrite-history.sh`. |
+| ✅ | No `permissions:` block | The workflow has `permissions: contents: read`. |
+| ✅ | Actions referenced by tag (`@v7`) | Actions are pinned to commit SHAs, with the version in a comment. |
+| ✅ | No Dependabot | `.github/dependabot.yml` updates the `uv` and `github-actions` ecosystems weekly, grouped into one PR each. |
+| ✅ | No vulnerability scanning | The `audit` job runs `pip-audit` on the runtime dependencies exported from `uv.lock`. |
+| ✅ | No `concurrency:` group | Superseded runs of the same branch or PR are cancelled. |
+| ✅ | Lint target missed `tasks.py` | Ruff checks and format-checks the whole repository. |
+| ✅ | No CLI smoke test | The `secrets` job runs an offline `plan` for every application under `files/`, using each stage's first role. |
+| ❌ | Shell scripts aren't linted | Run `shellcheck` on `files/camel_init` (runs as root on targets) and `scripts/rewrite-history.sh`. `camel_init` contains `[[name]]` placeholders, so render it first or exclude those lines. |
 | ❌ | Coverage isn't measured | Run `coverage run -m unittest` and upload the report or enforce a floor. |
-| ❌ | Lint target misses `tasks.py` | CI runs `ruff check deployment` and `ruff format --check deployment`; use `.` for both. mypy already covers `tasks.py`. |
-| ❌ | No CLI smoke test | Run `python -m deployment plan` for each sample stage and app. The sample environment makes this possible without real hosts. |
 
 ## 🟡 Python code
 
 - ✅ **Fixed: `unseal` errors showed a traceback.** The `secrets` subcommand
   now catches `TypeError` (`deployment/__main__.py:359`).
-- ❌ **Missing `ARTIFACTORY_PASSWORD` raises `KeyError`.** Setting
-  `ARTIFACTORY_USERNAME` alone fails at `deployment/artifacts.py:59` and is
-  reported with the generic "Inspect the target service…" hint, which points
-  the operator the wrong way. Raise a `ValueError` naming the missing
-  variable.
-- ❌ **`config_files()` runs once per host** inside the deploy loop
-  (`deployment/__main__.py:288`) with identical inputs. Render once before the
-  loop.
-- ❌ **The rollback lookup is quadratic:** it uses
-  `next(item for item in states if item[0] is remote)`
-  (`deployment/__main__.py:267`). Iterate over `states` directly.
-- ❌ **`execute()` is 178 lines** (ruff PLR0912/PLR0915). Splitting it into
+- ✅ **Fixed: missing `ARTIFACTORY_PASSWORD` raised `KeyError`.** It is now a
+  `ValueError` naming the missing variable.
+- ✅ **Fixed: `config_files()` ran once per host.** Configuration and shared
+  files are rendered once and the same bundle is uploaded to every host.
+- ✅ **Fixed: the rollback lookup was quadratic.** Rollback checks every host
+  first, then restores them in one pass over the collected states.
+- ✅ **Fixed: health-check timing wasn't configurable.** Each inventory can
+  set `health_timeout` (seconds, 5–1800, default 60); checks run every 5 s.
+- ❌ **`execute()` is long** (ruff PLR0912/PLR0915). Splitting it into
   `_plan`, `_lifecycle`, `_rollback` and `_deploy` would make the recovery path
   easier to review and test.
-- ⚠️ **Health-check timing isn't configurable per stage.** It's now named
-  (`HEALTH_ATTEMPTS = 12`, `HEALTH_INTERVAL = 5` in `deployment/remote.py`)
-  and logged per attempt, but JVM services with slow startup may need longer
-  than 60 s; make it an inventory setting.
 - ✅ **Done: no hardcoded Artifactory.** The default repository URL (an
   internal IP) and Maven group are gone; each inventory sets
   `artifactory_url` and `artifact_group`, `--repository` or `--artifact-url`
@@ -147,10 +135,8 @@ reached.
 
 ## 🟢 Nice to have
 
-- ❌ **The README badge and project name use the old repository name.** The
-  badge links to `nikhilvibhav/capistrano-migration`, but the remote is
-  `nikhilvibhav/fabric-deployments`; `pyproject.toml` still says
-  `name = "capistrano-migration"`.
+- ✅ **Fixed: the README badge and project name** now use
+  `fabric-deployments`, matching the repository.
 - ✅ **Done: `pyproject.toml`** holds project metadata,
   `requires-python = ">=3.11"`, locked dependencies, dev dependencies and the
   ruff and mypy config. The project runs with `python -m deployment`
@@ -183,11 +169,7 @@ the code on 2026-11-15.
 ## Suggested order
 
 1. Rotate every credential that was ever committed.
-2. Harden the workflow: `permissions:`, SHA-pinned actions, Dependabot,
-   `pip-audit`, secret scanning.
+2. Add secret scanning to CI.
 3. Refuse Artifactory credentials over HTTP (or switch to anonymous or
    read-only access), and pin prod and DR deployments to the preprod digest.
-4. Small code fixes: the `ARTIFACTORY_PASSWORD` error, rendering config once,
-   the rollback lookup, configurable health-check timing.
-5. Split `execute()`, then the remaining tooling items (coverage, shellcheck,
-   plan smoke test, badge and project name).
+4. Split `execute()`, then add coverage and shellcheck.

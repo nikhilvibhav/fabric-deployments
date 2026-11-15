@@ -54,6 +54,8 @@ class Settings(TypedDict):
 
     keep_releases: int
     use_supervisor: bool
+    # Seconds to wait for a restarted service to become healthy.
+    health_timeout: int
     gelf_host: NotRequired[str]
     # Artifactory root, e.g. https://artifactory.example/artifactory
     artifactory_url: NotRequired[str]
@@ -110,9 +112,12 @@ def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
             "use_supervisor",
             "artifactory_url",
             "artifact_group",
+            "health_timeout",
         }
         or type(supplied_settings.get("keep_releases", 1)) is not int
         or supplied_settings.get("keep_releases", 1) < 1
+        or type(supplied_settings.get("health_timeout", 60)) is not int
+        or not 5 <= supplied_settings.get("health_timeout", 60) <= 1800
         or not isinstance(supplied_settings.get("use_supervisor", False), bool)
         or any(
             name in supplied_settings and not isinstance(supplied_settings[name], str)
@@ -125,6 +130,7 @@ def environment(stage: str, root: Path = ROOT) -> tuple[Settings, list[Host]]:
     settings: Settings = {
         "keep_releases": 1,
         "use_supervisor": False,
+        "health_timeout": 60,
         **supplied_settings,
     }
     hosts = []

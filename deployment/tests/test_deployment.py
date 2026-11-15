@@ -54,6 +54,7 @@ class ConfigurationTests(unittest.TestCase):
         settings: Settings = {
             "keep_releases": 1,
             "use_supervisor": False,
+            "health_timeout": 60,
             "artifactory_url": "https://artifactory.example/artifactory/",
             "artifact_group": "com/example",
         }
@@ -76,9 +77,32 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertIsNone(
             cli.repository_base(
-                None, {"keep_releases": 1, "use_supervisor": False}, "stable"
+                None,
+                {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
+                "stable",
             )
         )
+
+    def test_inventory_health_timeout_defaults_and_bounds(self):
+        """Default health_timeout to 60 s and reject values outside 5-1800."""
+        settings, _ = environment("sample-qa")
+        self.assertEqual(settings["health_timeout"], 60)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "deployment" / "inventories" / "stage.json"
+            path.parent.mkdir(parents=True)
+            for timeout in (4, 1801, "60", True):
+                with self.subTest(timeout=timeout):
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "settings": {"health_timeout": timeout},
+                                "hosts": [{"address": "h", "roles": ["app1"]}],
+                            }
+                        )
+                    )
+                    with self.assertRaises(ValueError):
+                        environment("stage", root)
 
     def test_inventory_artifact_group_must_be_a_relative_path(self):
         """Reject an artifact group that could escape the repository path."""
@@ -109,7 +133,7 @@ class ConfigurationTests(unittest.TestCase):
             "oba/oba-api",
             "1.2.3",
             True,
-            {"keep_releases": 1, "use_supervisor": False},
+            {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
             environ={
                 "java_opts": "'-Xmx256m -Xms128m'",
                 "jdbc_database_password": "secret",
@@ -126,7 +150,7 @@ class ConfigurationTests(unittest.TestCase):
                 "app",
                 "latest",
                 True,
-                {"keep_releases": 1, "use_supervisor": False},
+                {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
                 environ={},
             )
 
@@ -145,7 +169,7 @@ class ConfigurationTests(unittest.TestCase):
                     application,
                     "1",
                     False,
-                    {"keep_releases": 1, "use_supervisor": False},
+                    {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
                     environ={},
                 )
         with self.assertRaises(ValueError):
@@ -303,6 +327,15 @@ class ArtifactTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "found 2"):
             repo.resolve("https://repo", "app", "1", ".jar")
+
+    def test_username_without_password_is_a_clear_error(self):
+        """Name the missing variable instead of failing with a KeyError."""
+        environ = {"ARTIFACTORY_USERNAME": "deploy", "ARTIFACTORY_PASSWORD": ""}
+        with (
+            patch.dict("os.environ", environ),
+            self.assertRaisesRegex(ValueError, "ARTIFACTORY_PASSWORD is not"),
+        ):
+            Repository()
 
     def test_download_checksum(self):
         """Reject a mismatched download, naming both digests so the cause is clear."""
@@ -524,6 +557,19 @@ class RemoteTests(unittest.TestCase):
             self.remote.healthy()
         self.assertEqual(self.remote.run.call_count, 12)
 
+    def test_health_timeout_sets_the_number_of_checks(self):
+        """Check every 5 s until the stage's health_timeout, rounding up."""
+        remote = Remote("test@example.invalid", self.values, True, health_timeout=12)
+        remote.run = MagicMock(
+            return_value=SimpleNamespace(ok=False, stdout="app FATAL")
+        )
+        with (
+            patch("deployment.remote.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "healthy"),
+        ):
+            remote.healthy()
+        self.assertEqual(remote.run.call_count, 3)
+
     def test_restart_and_health_progress_are_logged(self):
         """Log the restart, each failed readiness attempt, and the healthy result."""
         host = self.remote.connection.host
@@ -682,7 +728,7 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_plan_fails_without_an_artifact_repository(self):
         """Fail before connecting when no inventory, option or URL names a repository."""
-        settings = {"keep_releases": 1, "use_supervisor": False}
+        settings = {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60}
         hosts = [Host("deploy@192.0.2.10", ("app1", "app2"))]
         with (
             patch.object(cli, "environment", return_value=(settings, hosts)),
@@ -752,6 +798,32 @@ class OrchestrationTests(unittest.TestCase):
         prepare.assert_not_called()
         first.activate.assert_not_called()
         first.close.assert_called_once()
+
+    def test_configuration_is_rendered_once_for_all_hosts(self):
+        """Render configuration once and upload the same bundle to every host."""
+        first, second = MagicMock(), MagicMock()
+        with patch.object(cli, "config_files", wraps=cli.config_files) as render:
+            self.deploy_with_fake_bundle(self.args(), first, second)
+        # One call validates templates before connecting; one renders the release.
+        self.assertEqual(render.call_count, 2)
+        self.assertEqual(
+            first.prepare.call_args.args[0], second.prepare.call_args.args[0]
+        )
+
+    def test_rollback_checks_every_host_before_restoring_any(self):
+        """Restore nothing if any selected host has no previous release."""
+        first, second = MagicMock(), MagicMock()
+        for remote, previous in ((first, "/opt/r/1"), (second, None)):
+            remote.current.return_value = "/opt/r/2"
+            remote.load_state.return_value = {"previous": previous}
+        with (
+            patch("deployment.remote.Remote", side_effect=[first, second]),
+            patch.object(cli, "decrypt_all", return_value={"api_token": "x"}),
+            self.assertRaisesRegex(ValueError, "No previous release"),
+        ):
+            cli.execute(self.args("rollback"))
+        first.restore.assert_not_called()
+        second.restore.assert_not_called()
 
     def test_retention_failure_does_not_undo_successful_deployment(self):
         """Keep a healthy published release active if pruning later fails."""
