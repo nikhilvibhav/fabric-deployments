@@ -1,8 +1,10 @@
 [project]
 name = "fabric-deployments"
 version = "0.1.0"
-description = "In progress deployment using fabric/invoke and python; replaces the current capistrano deployment"
+description = "Python CLI that deploys JAR services over SSH with Fabric: atomic releases, automatic rollback, and Git-stored secrets encrypted with libsodium."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Nikhil Vibhav", email = "nikhil92ind@gmail.com" }
 ]

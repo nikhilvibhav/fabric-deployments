@@ -430,3 +430,7 @@ uv run coverage run -m unittest discover -s deployment/tests && uv run coverage 
 `coverage report` fails if branch coverage drops below `fail_under` in `pyproject.toml` (80%). If gitleaks is installed, `gitleaks git --config .gitleaks.toml .` runs the CI scan; `.gitleaks.toml` exempts only the sample test keys and sealed secret stores.
 
 The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to real environments and do not replace a pilot deployment or operations review.
+
+## License
+
+[MIT](LICENSE) © 2026 Nikhil Vibhav
