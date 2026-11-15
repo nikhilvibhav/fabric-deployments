@@ -1,3 +1,17 @@
+"""Command-line entry point: ``python -m deployment <action> --stage ... --roles ...``.
+
+Actions:
+  plan      Validate inputs and templates offline and print a JSON summary.
+  deploy    Lock every selected host, download and verify the JAR, render
+            configuration, upload and activate the release on each host, then
+            prune old releases. Hosts that were already activated are restored
+            if any host fails.
+  rollback  Restore each host to the release that preceded its current one.
+  start/stop  Run the service lifecycle action on each selected host.
+
+``python -m deployment secrets ...`` is passed to :mod:`deployment.secrets`.
+"""
+
 import argparse
 import json
 import logging

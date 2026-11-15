@@ -1,3 +1,10 @@
+"""Resolve and download application artifacts from an Artifactory/Maven repository.
+
+Credentials come only from the environment (ARTIFACTORY_TOKEN, or
+ARTIFACTORY_USERNAME/ARTIFACTORY_PASSWORD). Requests are kept on a single origin
+and never follow redirects, so credentials cannot reach another host.
+"""
+
 import base64
 import hashlib
 import os

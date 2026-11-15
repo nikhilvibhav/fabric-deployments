@@ -1,3 +1,5 @@
+"""Tests for configuration loading, artifact handling, remote operations and orchestration."""
+
 import hashlib
 import io
 import json
@@ -31,30 +33,19 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_all_existing_inventories_and_role_selection(self):
         """Check repository inventories and role-based host selection."""
-        counts = {
-            "dr": 6,
-            "preprod": 8,
-            "production": 7,
-            "qa": 4,
-            "qe": 2,
-            "qs": 2,
-            "qt": 4,
-            "vagrant": 1,
-        }
+        counts = {"sample-qa": 2, "sample-prod": 3}
         for stage, count in counts.items():
             with self.subTest(stage=stage):
                 settings, hosts = environment(stage)
                 self.assertEqual(len(hosts), count)
-                self.assertEqual(
-                    settings["use_supervisor"], stage in {"qa", "qe", "qt"}
-                )
-        _, hosts = environment("preprod")
+                self.assertEqual(settings["use_supervisor"], stage == "sample-qa")
+        _, hosts = environment("sample-prod")
         self.assertEqual(
-            select_hosts(hosts, "cml1,cml2"),
-            ["buildbot@10.90.131.134", "buildbot@10.90.131.135"],
+            select_hosts(hosts, "app1,app2"),
+            ["deploy@198.51.100.10", "deploy@198.51.100.11"],
         )
         with self.assertRaisesRegex(ValueError, "Unknown roles"):
-            select_hosts(hosts, "app")
+            select_hosts(hosts, "app9")
 
     def test_jenkins_aliases_nested_application_and_second_artifact(self):
         """Verify legacy environment aliases and versioned application paths."""
@@ -113,24 +104,45 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing template variable: password"):
             render("[[password]]", {})
 
-    def test_actual_qa_configuration_and_shared_fallback(self):
-        """Render real QA configuration with defaults and a supplied secret."""
-        settings, _ = environment("qa")
+    def test_sample_configuration_and_shared_fallback(self):
+        """Render sample apps: one with its own properties, one using the fallback."""
+        settings, _ = environment("sample-qa")
         values = variables(
-            "qa",
-            "authentication-service",
+            "sample-qa",
+            "hello-service",
             "1",
             False,
             settings,
             environ={},
-            secret_values={"truststore_password": "not-a-p@ssw0rd"},
+            secret_values={"api_token": "not-a-t0ken"},
         )
-        files = config_files("qa", "authentication-service", values)
+        files = config_files("sample-qa", "hello-service", values)
         self.assertIn(b"server.port=8080", files["application.properties"])
         self.assertIn(
-            b"<graylogHost>graylog.service</graylogHost>", files["logback.xml"]
+            b"greeting.api.token=not-a-t0ken", files["application.properties"]
+        )
+        self.assertIn(
+            b"<graylogHost>logs.sample-qa.example</graylogHost>", files["logback.xml"]
         )
         self.assertIn("logback-access.xml", files)
+        self.assertNotIn(b"[[", b"".join(files.values()))
+        values = variables(
+            "sample-qa",
+            "orders-service",
+            "1",
+            False,
+            settings,
+            environ={},
+            secret_values={"jdbc_database_password": "not-a-p@ssw0rd"},
+        )
+        files = config_files(
+            "sample-qa", "orders-service", dict(values, release_path="/r")
+        )
+        self.assertIn(
+            b"spring.datasource.password=not-a-p@ssw0rd",
+            files["application.properties"],
+        )
+        self.assertIn(b"orders.queue.name=orders-sample-qa", files["orders.properties"])
         self.assertNotIn(b"[[", b"".join(files.values()))
 
     def test_flattened_config_collisions_fail(self):
@@ -257,9 +269,9 @@ class ArtifactTests(unittest.TestCase):
                 [
                     "deploy",
                     "--stage",
-                    "qa",
+                    "sample-qa",
                     "--roles",
-                    "cml1",
+                    "app1",
                     "--application",
                     "service",
                     "--version",
@@ -303,9 +315,9 @@ class ArtifactTests(unittest.TestCase):
             [
                 "deploy",
                 "--stage",
-                "qa",
+                "sample-qa",
                 "--roles",
-                "cml1",
+                "app1",
                 "--application",
                 "service",
                 "--version",
@@ -330,9 +342,9 @@ class RemoteTests(unittest.TestCase):
 
     def setUp(self):
         """Create a mocked remote with representative QA deployment settings."""
-        settings, _ = environment("qa")
+        settings, _ = environment("sample-qa")
         self.values = variables(
-            "qa", "authentication-service", "1", False, settings, environ={}
+            "sample-qa", "hello-service", "1", False, settings, environ={}
         )
         # Any: these tests replace Remote methods with mocks.
         self.remote: Any = Remote("test@example.invalid", self.values, True)
@@ -511,11 +523,11 @@ class OrchestrationTests(unittest.TestCase):
             [
                 action,
                 "--stage",
-                "qa",
+                "sample-qa",
                 "--roles",
-                "cml1,cml2",
+                "app1,app2",
                 "--application",
-                "authentication-service",
+                "hello-service",
                 "--version",
                 "1",
             ]
@@ -526,9 +538,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=list(remotes)),
             patch.object(cli, "prepare_bundle") as prepare,
-            patch.object(
-                cli, "decrypt_all", return_value={"truststore_password": "test-value"}
-            ),
+            patch.object(cli, "decrypt_all", return_value={"api_token": "test-value"}),
         ):
 
             def bundle(args, values, workspace):
@@ -637,9 +647,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
-            patch.object(
-                cli, "decrypt_all", return_value={"truststore_password": "test-value"}
-            ),
+            patch.object(cli, "decrypt_all", return_value={"api_token": "test-value"}),
         ):
 
             def bundle(args, values, workspace):
@@ -663,9 +671,7 @@ class OrchestrationTests(unittest.TestCase):
         with (
             patch("deployment.remote.Remote", side_effect=[first, second]),
             patch.object(cli, "prepare_bundle") as prepare,
-            patch.object(
-                cli, "decrypt_all", return_value={"truststore_password": "test-value"}
-            ),
+            patch.object(cli, "decrypt_all", return_value={"api_token": "test-value"}),
             self.assertRaisesRegex(RuntimeError, "locked"),
         ):
             cli.execute(self.args())

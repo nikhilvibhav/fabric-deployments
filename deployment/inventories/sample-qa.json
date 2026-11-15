@@ -1,0 +1,11 @@
+{
+  "settings": {
+    "keep_releases": 3,
+    "use_supervisor": true,
+    "gelf_host": "logs.sample-qa.example"
+  },
+  "hosts": [
+    {"address": "deploy@192.0.2.10", "roles": ["app1"]},
+    {"address": "deploy@192.0.2.11", "roles": ["app2"]}
+  ]
+}

@@ -1,3 +1,11 @@
+"""Load stage inventories, build deployment variables and render configuration.
+
+Inventories live in ``deployment/inventories/<stage>.json``. Configuration
+templates live in ``files/<stage>/<application>/`` and use ``[[name]]``
+placeholders, which are filled from defaults, a variables file, environment
+variables and decrypted secrets.
+"""
+
 import json
 import os
 import re
@@ -278,7 +286,7 @@ class _Recorder(dict[str, str]):
 def template_names(
     stage: str, application: str, root: Path = ROOT
 ) -> tuple[set[str], dict[str, bytes]]:
-    """Placeholder names and blank-rendered files, selected exactly as deploy does."""
+    """Return placeholder names and blank-rendered files, selected as deploy does."""
     recorder = _Recorder()
     files = config_files(stage, application, recorder, root)
     return recorder.names, files

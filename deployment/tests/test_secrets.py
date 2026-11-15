@@ -1,3 +1,5 @@
+"""Tests for encrypted secret stores, the secrets CLI and their use during deployment."""
+
 import io
 import json
 import os
@@ -12,6 +14,18 @@ from unittest.mock import MagicMock, patch
 from deployment import __main__ as cli
 from deployment import secrets
 from deployment.config import variables
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def sample_key(test_case, stage):
+    """Copy a committed sample test key to a 0600 temp file, as the CLI requires."""
+    directory = tempfile.TemporaryDirectory()
+    test_case.addCleanup(directory.cleanup)
+    path = Path(directory.name) / f"{stage}.private.key"
+    shutil.copyfile(FIXTURES / f"{stage}.test-key", path)
+    path.chmod(0o600)
+    return path
 
 
 class TemporaryStoreTestCase(unittest.TestCase):
@@ -384,15 +398,15 @@ class DeploymentIntegrationTests(unittest.TestCase):
             )
 
     def args(self, action, key=None):
-        """Build standard QA CLI arguments for deployment integration tests."""
+        """Build sample-qa CLI arguments for deployment integration tests."""
         argv = [
             action,
             "--stage",
-            "qa",
+            "sample-qa",
             "--roles",
-            "cml1",
+            "app1",
             "--application",
-            "camel-endpoint-test-tool",
+            "orders-service",
             "--version",
             "1",
         ]
@@ -464,6 +478,73 @@ class DeploymentIntegrationTests(unittest.TestCase):
         self.assertIn(
             "spring.datasource.password=s3cret", captured["application.properties"]
         )
+
+
+class SampleEnvironmentTests(unittest.TestCase):
+    """Use the committed sample stages and test keys without mocking secrets."""
+
+    def test_sample_secrets_decrypt_with_their_test_keys(self):
+        """Decrypt every sample store and reject the other stage's key."""
+        expected = {
+            "hello-service": {"api_token": "{stage}-api-token"},
+            "orders-service": {"jdbc_database_password": "{stage}-db-password"},
+        }
+        for stage in ("sample-qa", "sample-prod"):
+            key = sample_key(self, stage)
+            for application, values in expected.items():
+                with self.subTest(stage=stage, application=application):
+                    self.assertEqual(
+                        secrets.decrypt_all(stage, application, key),
+                        {
+                            name: value.format(stage=stage)
+                            for name, value in values.items()
+                        },
+                    )
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            secrets.decrypt_all(
+                "sample-prod", "hello-service", sample_key(self, "sample-qa")
+            )
+
+    def test_sample_deploy_renders_decrypted_secret_into_configuration(self):
+        """Deploy sample-prod with its test key, faking only SSH and the download."""
+        captured = {}
+        remote = MagicMock()
+
+        def prepare(bundle, release, metadata, shared):
+            """Capture generated configuration files passed to the remote."""
+            captured.update(
+                {path.name: path.read_text() for path in (bundle / "config").iterdir()}
+            )
+
+        remote.prepare.side_effect = prepare
+
+        def bundle(args, values, workspace):
+            """Create the minimal bundle needed by the sample deployment."""
+            path = workspace / "bundle"
+            path.mkdir()
+            return path, {"artifact_url": "http://repo/app.jar", "sha256": "ab12"}
+
+        argv = [
+            "deploy",
+            "--stage",
+            "sample-prod",
+            "--roles",
+            "app1",
+            "--application",
+            "hello-service",
+            "--version",
+            "2.0.0",
+            "--secrets-key",
+            str(sample_key(self, "sample-prod")),
+        ]
+        with (
+            patch.object(cli, "prepare_bundle", side_effect=bundle),
+            patch("deployment.remote.Remote", return_value=remote),
+        ):
+            cli.execute(cli.parser().parse_args(argv))
+        properties = captured["application.properties"]
+        self.assertIn("greeting.api.token=sample-prod-api-token", properties)
+        self.assertIn("greeting.message=Hello from sample-prod (2.0.0)", properties)
 
 
 if __name__ == "__main__":

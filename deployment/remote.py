@@ -1,3 +1,15 @@
+"""Run one application's deployment on a single SSH host over Fabric.
+
+Remote layout under ``deploy_to``::
+
+    releases/<id>/              uploaded release; .deployment/ holds rollback state
+    current -> releases/<id>    active release, switched atomically
+    shared/                     files that persist across releases
+    .deploy-lock/               held while a deployment runs on the host
+
+The service is managed by Supervisor or a SysV init script.
+"""
+
 import io
 import json
 import logging

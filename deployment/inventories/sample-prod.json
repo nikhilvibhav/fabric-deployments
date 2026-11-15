@@ -1,0 +1,11 @@
+{
+  "settings": {
+    "keep_releases": 5,
+    "gelf_host": "logs.sample-prod.example"
+  },
+  "hosts": [
+    {"address": "deploy@198.51.100.10", "roles": ["app1"]},
+    {"address": "deploy@198.51.100.11", "roles": ["app2"]},
+    {"address": "deploy@198.51.100.12", "roles": ["app3"]}
+  ]
+}

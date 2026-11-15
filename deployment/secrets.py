@@ -329,7 +329,7 @@ def rekey(
 
 
 def plaintext_properties(content: bytes) -> Iterator[str]:
-    """Keys of sensitive-looking properties that still hold a literal value."""
+    """Yield keys of sensitive-looking properties that still hold a literal value."""
     for line in content.decode("utf-8", "replace").splitlines():
         key, separator, value = line.partition("=")
         key, value = key.strip(), value.strip()

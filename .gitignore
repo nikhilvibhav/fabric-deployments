@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 .env
 .ruff_cache/
+.mypy_cache/
+.claude/
 # Stage private keys must never be committed; only public.key belongs in Git.
 *.private.key
 secrets/**/*.key

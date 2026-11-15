@@ -1,3 +1,5 @@
+"""Tests for ``[[name]]`` template rendering and configuration file selection."""
+
 import re
 import tempfile
 import unittest
@@ -71,22 +73,13 @@ class TemplateTests(unittest.TestCase):
                 and len(path.relative_to(ROOT / "files").parts) >= 3
             }
         )
-        self.assertGreater(len(applications), 50)
-        successful = 0
+        self.assertTrue(applications, "no stage configuration found under files/")
         for relative in applications:
             stage, application = relative.parts[0], "/".join(relative.parts[1:])
             with self.subTest(stage=stage, application=application):
-                try:
-                    files = config_files(stage, application, values)
-                except ValueError as exc:
-                    self.assertIn(
-                        "Flattened configuration filename collision", str(exc)
-                    )
-                    continue
-                successful += 1
+                files = config_files(stage, application, values)
                 for name, content in files.items():
                     self.assertNotIn(b"[[", content, name)
-        self.assertGreater(successful, 50)
         for name in ("camel_init", "camel_supervisord"):
             content = render_file(ROOT / "files" / name, values)
             self.assertNotIn(b"[[", content)

@@ -21,6 +21,7 @@ This Python CLI deploys JAR artifacts from Artifactory to existing hosts over SS
 - [Configure deployments](#configure-deployments)
   - [Parameters and environment variables](#parameters-and-environment-variables)
   - [Inventories and application files](#inventories-and-application-files)
+  - [Sample environment](#sample-environment)
   - [Templates and placeholders](#templates-and-placeholders)
   - [Artifacts](#artifacts)
 - [Manage encrypted secrets](#manage-encrypted-secrets)
@@ -37,7 +38,7 @@ This Python CLI deploys JAR artifacts from Artifactory to existing hosts over SS
 
 The deployment CLI provides `plan`, `deploy`, `rollback`, `start`, and `stop` actions. It uses stage inventories to select hosts and roles, downloads artifacts on the controller, and deploys releases and rendered configuration to the selected hosts.
 
-The CLI does not switch branches or fetch application source. For the initial QA pilot, confirm SSH and sudo access, artifact selection, service health, and rollback before changing other jobs.
+The CLI does not switch branches or fetch application source. The repository ships only a [sample environment](#sample-environment); add your own stages before deploying anywhere.
 
 ## Prerequisites
 
@@ -97,13 +98,13 @@ Start with an offline plan:
 
 ```sh
 python -m deployment plan \
-  --stage qa \
-  --roles cml1 \
-  --application authentication-service \
+  --stage sample-qa \
+  --roles app1 \
+  --application hello-service \
   --version 1.0.0
 ```
 
-The `cml1` role selects an existing QA host role; confirm it is the intended placement before the pilot. Planning validates configuration and templates without SSH or Artifactory access. It does not prove remote connectivity or artifact availability.
+The `app1` role selects the first host of the sample `sample-qa` stage. Planning validates configuration and templates without SSH or Artifactory access. It does not prove remote connectivity or artifact availability.
 
 A plan can run without a secrets key. It lists secret names and validates templates using placeholders. Supplying a key also checks decryption.
 
@@ -111,7 +112,7 @@ A plan can run without a secrets key. It lists secret names and validates templa
 
 Disable concurrent builds of the deployment job. Remote application locks also prevent overlapping deployments made through this CLI.
 
-In a QA Jenkins job or another runner, invoke the CLI:
+In a Jenkins job or another runner, invoke the CLI:
 
 ```sh
 set -eu
@@ -119,8 +120,8 @@ set +x
 . /opt/venvs/camel-deploy/bin/activate
 cd /tmp/workspace
 python -m deployment deploy \
-  --stage qa \
-  --roles cml1 \
+  --stage sample-qa \
+  --roles app1 \
   --application "$application" \
   --version "$version"
 ```
@@ -132,9 +133,9 @@ Store secrets as encrypted repository values, not as job parameters or command-l
 Optional Invoke entrypoints call the same implementation:
 
 ```sh
-invoke plan --stage qa --roles cml1 --application authentication-service
-invoke deploy --stage qa --roles cml1 --application authentication-service
-invoke rollback --stage qa --roles cml1 --application authentication-service
+invoke plan --stage sample-qa --roles app1 --application hello-service
+invoke deploy --stage sample-qa --roles app1 --application hello-service
+invoke rollback --stage sample-qa --roles app1 --application hello-service
 ```
 
 Invoke obtains artifact and version settings from the environment. For all CLI options, run:
@@ -148,9 +149,9 @@ python -m deployment --help
 The CLI supports `rollback`, `stop`, and `start`:
 
 ```sh
-python -m deployment rollback --stage qa --roles cml1 --application authentication-service
-python -m deployment stop --stage qa --roles cml1 --application authentication-service
-python -m deployment start --stage qa --roles cml1 --application authentication-service
+python -m deployment rollback --stage sample-qa --roles app1 --application hello-service
+python -m deployment stop --stage sample-qa --roles app1 --application hello-service
+python -m deployment start --stage sample-qa --roles app1 --application hello-service
 ```
 
 For a second artifact, use the same `--version` and `--second-artifact true` for lifecycle and rollback commands.
@@ -163,14 +164,14 @@ CLI options override environment variables where applicable. `application` is re
 
 | Input | Behavior |
 | --- | --- |
-| `application`, `version` | Nested application names such as `oba/oba-api` are supported. |
+| `application`, `version` | Nested application names such as `team/orders-api` are supported. |
 | Release type | Inferred from `version`: only versions ending exactly in `-SNAPSHOT` use the snapshot repository; other versions, including `latest`, use the stable repository. If supplied, `--release-type` must agree. |
 | `deploy_second_artifact` | Strict `true`/`false`; appends the explicit version to the installation directory and service name. `latest` is rejected for this mode. |
 | `java_bin`, `jvm_options` | Existing Java parameters. `java_opts` is an alias if `jvm_options` is absent. One matching pair of wrapping quotes is removed from JVM options. |
 | DB and template variables | Existing lowercase environment variable names are retained. Required secret values have no insecure default. Missing template variables fail before connecting. Prefer [encrypted secrets](#manage-encrypted-secrets) for sensitive values. A name supplied both as an encrypted secret and an environment variable is rejected. |
 | `--secrets-key`, `CAMEL_SECRETS_KEY_FILE` | Path to the stage's private key. Required for `deploy` when the application has encrypted secrets. |
 | `--vars-file` | JSON object for additional template values. Environment values override known existing parameters; CLI identity fields cannot be overridden by the file. Keep secret files outside Git with restricted permissions. |
-| `--stage`, `--roles` | Required explicitly. Roles are comma-separated, such as `cml1,cml2` or `app`. Unknown roles fail rather than deploying to every host. |
+| `--stage`, `--roles` | Required explicitly. Roles are comma-separated, such as `app1,app2`. Unknown roles fail rather than deploying to every host. |
 | `--health-url`, `health_url` | Optional target-local HTTP(S) endpoint, for example `http://127.0.0.1:8080/actuator/health`. URLs must not contain credentials or query strings. |
 
 Additional artifact-related environment variables are documented in [Artifacts](#artifacts).
@@ -179,9 +180,32 @@ Additional artifact-related environment variables are documented in [Artifacts](
 
 Environment inventories are JSON files under `deployment/inventories/`. They declare host addresses, roles, GELF settings, release retention, and service manager. Artifact downloads use the controller's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings.
 
-`.properties` and `.xml` files are flattened into each release's `config/` directory, including the 33 existing service XML files that were not previously part of deployment. If environment-specific application properties or logback files are missing, the shared files in `files/` are used. Flattened filename collisions fail instead of overwriting files.
+`.properties` and `.xml` files are flattened into each release's `config/` directory. If environment-specific application properties or logback files are missing, the shared files in `files/` are used. Flattened filename collisions fail instead of overwriting files.
 
 Top-level `*.shared` files are copied by content into `shared/`, without the `.shared` suffix. Their previous contents are recorded for rollback. Keystores and other binary files are **not automatically uploaded**; provision them separately.
+
+### Sample environment
+
+The repository contains only sample data, so it can be cloned and tested without access to any real system:
+
+| Path | Contents |
+| --- | --- |
+| `deployment/inventories/sample-qa.json` | Two hosts (`app1`, `app2`) using Supervisor, at documentation-only addresses (`192.0.2.0/24`). |
+| `deployment/inventories/sample-prod.json` | Three hosts (`app1` to `app3`) using SysV, at documentation-only addresses (`198.51.100.0/24`). |
+| `files/STAGE/hello-service/` | Its own `application.properties`, with an encrypted `[[api_token]]`. |
+| `files/STAGE/orders-service/` | `orders.properties`; uses the shared `files/application.properties`, with an encrypted `[[jdbc_database_password]]`. |
+| `secrets/STAGE/` | Each stage's `public.key` and encrypted values. |
+| `deployment/tests/fixtures/STAGE.test-key` | **Test-only** private keys for the sample stages. Never use them, or this naming, for a real stage. |
+
+Try it offline:
+
+```sh
+python -m deployment plan --stage sample-qa --roles app1 --application hello-service --version 1.0.0
+cp deployment/tests/fixtures/sample-qa.test-key /tmp/sample-qa.key && chmod 600 /tmp/sample-qa.key
+python -m deployment secrets verify --stage sample-qa --application hello-service --secrets-key /tmp/sample-qa.key
+```
+
+To add a real stage, create `deployment/inventories/STAGE.json` and `files/STAGE/APPLICATION/`, then run `secrets keygen` for it and keep its private key outside the repository. The sample stages can be deleted once real ones exist; update the tests that use them.
 
 ### Templates and placeholders
 
@@ -205,18 +229,18 @@ Example with an exact artifact URL, SHA-256, and health check:
 
 ```sh
 python -m deployment deploy \
-  --stage qa \
-  --roles cml1 \
-  --application authentication-service \
+  --stage sample-qa \
+  --roles app1 \
+  --application hello-service \
   --version 1.0.0 \
-  --artifact-url https://artifacts.example/repository/authentication-service-1.0.0.jar \
+  --artifact-url https://artifacts.example/repository/hello-service-1.0.0.jar \
   --sha256 EXPECTED_SHA256 \
   --health-url http://127.0.0.1:8080/actuator/health
 ```
 
 `artifact_url`, `artifact_sha256`, `path_to_jar`, and `artifactory_base_url` can also be supplied as environment variables. SHA-256 verification is optional; the actual digest and resolved URL are always logged and recorded in release metadata.
 
-Snapshot builds (`-SNAPSHOT`, deployed to QA and QT) are rebuilt under the same version, so don't pin them. For a stable build, preprod's job log prints `Pin this build in later stages with: --sha256 DIGEST`. Pass that argument when deploying the same version to prod and DR; the deployment fails if Artifactory returns a different JAR.
+Snapshot builds (`-SNAPSHOT`) are rebuilt under the same version, so don't pin them. For a stable build, the job log of the first stage it reaches prints `Pin this build in later stages with: --sha256 DIGEST`. Pass that argument when deploying the same version to later stages; the deployment fails if Artifactory returns a different JAR.
 
 ## Manage encrypted secrets
 
@@ -225,7 +249,7 @@ Snapshot builds (`-SNAPSHOT`, deployed to QA and QT) are rebuilt under the same 
 Secrets are stored in Git encrypted per environment using libsodium sealed boxes via PyNaCl. No Vault, Jenkins credentials, or other service is required.
 
 - `secrets/STAGE/public.key` encrypts values. It is committed; anyone can add or rotate a value with it but cannot read existing values.
-- The stage's **private key** decrypts. Keep it outside Git on the deployment controller/operator system and supply it with `--secrets-key PATH` or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key; a QA key cannot decrypt production secrets, and a mismatched key is rejected.
+- The stage's **private key** decrypts. Keep it outside Git on the deployment controller/operator system and supply it with `--secrets-key PATH` or `CAMEL_SECRETS_KEY_FILE`. Each stage has its own key; a `sample-qa` key cannot decrypt `sample-prod` secrets, and a mismatched key is rejected.
 - `secrets/STAGE/APPLICATION.json` holds one sealed value per name. Names remain readable for review; values do not. Each value is bound to its stage, application, and name, so ciphertext cannot be copied elsewhere.
 - Each store also records a `key_id`, a fingerprint of the public key that sealed its values. A store whose `key_id` doesn't match `public.key` is refused by `set`, `unset` and deploys, and reported by `check`.
 
@@ -237,16 +261,16 @@ Create a key pair for a new stage. Commit `secrets/STAGE/public.key`; keep the p
 
 ```sh
 python -m deployment secrets keygen \
-  --stage qa \
-  --private-key-out /secure/qa.private.key
+  --stage sample-qa \
+  --private-key-out /secure/sample-qa.private.key
 ```
 
 Add or rotate a value. The command prompts twice; alternatively, use `--value-from -` to read it from standard input:
 
 ```sh
 python -m deployment secrets set \
-  --stage qa \
-  --application authentication-service \
+  --stage sample-qa \
+  --application hello-service \
   --name jdbc_database_password
 ```
 
@@ -254,12 +278,12 @@ List names without displaying values, or remove a value:
 
 ```sh
 python -m deployment secrets list \
-  --stage qa \
-  --application authentication-service
+  --stage sample-qa \
+  --application hello-service
 
 python -m deployment secrets unset \
-  --stage qa \
-  --application authentication-service \
+  --stage sample-qa \
+  --application hello-service \
   --name jdbc_database_password
 ```
 
@@ -274,7 +298,7 @@ Run checks for all stages, or narrow them to a stage and application:
 
 ```sh
 python -m deployment secrets check
-python -m deployment secrets check --stage qa --application authentication-service
+python -m deployment secrets check --stage sample-qa --application hello-service
 ```
 
 CI runs this check on every push and pull request. To run it before each commit, install the hook once:
@@ -287,55 +311,55 @@ pre-commit install
 Key holders can use `verify` to decrypt values. It prints names only. To compare a value interactively without displaying it, use `--compare`; this requires a terminal and cannot be scripted into CI logs:
 
 ```sh
-export CAMEL_SECRETS_KEY_FILE=/secure/qa.private.key
+export CAMEL_SECRETS_KEY_FILE=/secure/sample-qa.private.key
 
 python -m deployment secrets verify \
-  --stage qa \
-  --application authentication-service
+  --stage sample-qa \
+  --application hello-service
 
 python -m deployment secrets verify \
-  --stage qa \
-  --application authentication-service \
+  --stage sample-qa \
+  --application hello-service \
   --name jdbc_database_password \
   --compare
 ```
 
 ### Rekey a stage
 
-Run rekey from the repository checkout. Use a new private-key filename that does not already exist; the command will not overwrite a key. Keep it outside the repository and restrict access. Replace the stage and paths in this QA example as needed:
+Run rekey from the repository checkout. Use a new private-key filename that does not already exist; the command will not overwrite a key. Keep it outside the repository and restrict access. Replace the stage and paths in this example as needed:
 
 ```sh
 python -m deployment secrets rekey \
-  --stage qa \
-  --old-key /secure/qa.private.key \
-  --private-key-out /secure/qa-2026-11.private.key
+  --stage sample-qa \
+  --old-key /secure/sample-qa.private.key \
+  --private-key-out /secure/sample-qa-2026-11.private.key
 ```
 
 Rekey decrypts, re-encrypts and verifies every application store in memory before writing anything. It then writes the new private key, rewrites every store, and replaces `public.key` last. If it is interrupted while writing, `check` reports the stores whose `key_id` no longer matches `public.key`. Restore the previous state with Git, delete the new private key, and run rekey again:
 
 ```sh
-git checkout -- secrets/qa
+git checkout -- secrets/sample-qa
 ```
 
 Verify the new key against each application before relying on it:
 
 ```sh
 python -m deployment secrets verify \
-  --stage qa \
-  --application authentication-service \
-  --secrets-key /secure/qa-2026-11.private.key
+  --stage sample-qa \
+  --application hello-service \
+  --secrets-key /secure/sample-qa-2026-11.private.key
 
-python -m deployment secrets check --stage qa
+python -m deployment secrets check --stage sample-qa
 ```
 
 After verification, commit every change under the stage directory together. Never commit the private key:
 
 ```sh
-git add secrets/qa
+git add secrets/sample-qa
 git diff --cached --stat
 ```
 
-Rekey changes every store's `key_id`, so a branch that changed secrets for the same stage will get a merge conflict instead of silently losing its change. To resolve it, take the rekeyed files (`git checkout --theirs secrets/qa` when merging `main` into your branch) and repeat your `secrets set` or `unset` commands on top.
+Rekey changes every store's `key_id`, so a branch that changed secrets for the same stage will get a merge conflict instead of silently losing its change. To resolve it, take the rekeyed files (`git checkout --theirs secrets/sample-qa` when merging `main` into your branch) and repeat your `secrets set` or `unset` commands on top.
 
 Keep the old private key securely if you may need to decrypt older commits. If the old key was exposed, rotate the actual secret values too; rekeying alone does not invalidate leaked credentials.
 
@@ -347,7 +371,7 @@ Keep the old private key securely if you may need to decrypt older commits. If t
 - If a private key leaks, rekeying alone is not enough: **rotate the actual secret values** (database passwords, etc.) too.
 - Revoking someone’s ability to add secrets is not needed because encryption can be done with the public key. If someone who held a private key must be revoked, rekey and rotate the values.
 
-Rendered config files remain plaintext on target hosts with mode `0640` and group `camel`. Existing plaintext credentials in `.properties` files can be replaced with `[[name]]` placeholders and encrypted values. Rotate anything already committed in plaintext because Git history retains it. Encrypted secrets hold text values only; binary files such as keystores and `kognitio-privateKey` are not covered and must be provisioned on hosts separately.
+Rendered config files remain plaintext on target hosts with mode `0640` and group `camel`. Existing plaintext credentials in `.properties` files can be replaced with `[[name]]` placeholders and encrypted values. Rotate anything already committed in plaintext because Git history retains it. Encrypted secrets hold text values only; binary files such as keystores and SSH or DSA private keys are not covered and must be provisioned on hosts separately.
 
 ## Deployment behavior and recovery
 
@@ -367,7 +391,7 @@ ansiColor('xterm') {
 
 If `--health-url` is supplied, HTTP readiness is also required, with up to 12 attempts at five-second intervals. Without it, **process status alone is not application readiness**.
 
-QA, QE, and QT retain Supervisor. Other environments retain the existing SysV script and `service`/systemd compatibility behavior; this is not a service-manager migration. A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
+Each inventory chooses its service manager: `"use_supervisor": true` (as in `sample-qa`) uses Supervisor, otherwise the SysV script and `service`/systemd compatibility behavior are used (as in `sample-prod`). A Supervisor deployment refuses to proceed if a conflicting SysV definition remains. Resolve that operationally before deployment.
 
 If deployment fails, previously activated hosts and the host whose activation failed are restored in reverse order, including saved service definitions and shared files. Rollback failure is reported explicitly and requires manual recovery. There is no load-balancer draining, distributed atomic cutover, or guarantee of zero downtime. If a controller is interrupted or killed, it may leave locks or partially activated releases; inspect each selected host rather than assuming rollback ran.
 
@@ -391,4 +415,4 @@ CI also lints, checks formatting and type-checks. Run the same checks locally:
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
-The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to internal environments and do not replace the QA pilot or operations review.
+The tests cover template and inventory loading, artifact resolution, JAR validation, release preparation, and failure recovery using mocked remote connections. They do not deploy to real environments and do not replace a pilot deployment or operations review.

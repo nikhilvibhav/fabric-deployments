@@ -20,22 +20,15 @@ than the Python logic.
    without displaying it. The new `secrets check` lets developers validate
    secrets without a key, and it runs in pre-commit and CI.
 
-2. **Plaintext credentials and private keys are committed.** Only
-   `secrets/qa/` has been migrated to encrypted values. Production, preprod and
-   DR have only a `public.key`, while their configs still hold plaintext
-   values: 18 `spring.datasource.password` entries plus `am.admin.password`,
-   `salesforce.password` and others in `files/production` alone. A
-   `-----BEGIN DSA PRIVATE KEY-----` file (`kognitio-privateKey`) is committed
-   for 7 environments, along with `.jks` keystores.
-   - Move these values to `secrets/<stage>/*.json` with `[[name]]`
-     placeholders.
-   - **Rotate the credentials.** Git history retains the old values.
+2. ✅ **Removed: plaintext credentials and private keys were committed.**
+   All configuration inherited from Capistrano (`files/<stage>/`, with plaintext
+   passwords, a DSA private key and `.jks` keystores), the real inventories,
+   secrets and `lookup-hostnames.sh` have been replaced by a sample
+   environment. `scripts/rewrite-history.sh` removes them from Git history too.
+   - **Rotate the credentials anyway.** Old clones, forks and the hosting
+     service's caches can still hold them.
    - Add a secret-scanning step to CI (gitleaks or trufflehog) so new
      plaintext can't be committed.
-   - `secrets check` already warns about two plaintext values in QA apps
-     that otherwise use encrypted secrets: `am.admin.password`
-     (`qa/oba-account-service`) and `rest.api.security.encoded_password`
-     (`qa/tplms-finder-service`).
 
 3. **Artifacts and Artifactory credentials travel over plain HTTP**
    (MEDIUM, accepted risk; earlier review #1 rated it HIGH).
@@ -100,7 +93,7 @@ than the Python logic.
 | No vulnerability scanning | Add `pip-audit -r deployment/requirements.txt`. |
 | No `concurrency:` group | Add one with `cancel-in-progress: true` for PR refs. |
 | No Dependabot | Add `.github/dependabot.yml` for `pip` and `github-actions`. |
-| Shell scripts aren't linted | Run `shellcheck` on `lookup-hostnames.sh` and `files/camel_init` (which runs as root on targets). |
+| Shell scripts aren't linted | Run `shellcheck` on `files/camel_init` (which runs as root on targets) and `scripts/rewrite-history.sh`. |
 | Coverage isn't measured | Run `coverage run -m unittest` and upload the report or enforce a floor. |
 | Lint target misses `tasks.py` | Run `ruff check .` instead of `ruff check deployment`. |
 
@@ -147,9 +140,8 @@ test already covers rendering.
   annotated, and `disallow_untyped_defs` is enabled for those modules.
   Inventory settings are a `Settings` `TypedDict`; deployment variables and
   rollback state stay `dict[str, Any]`.
-- **`lookup-hostnames.sh` hardcodes a username and the inventory IPs.** Read
-  the IPs from `deployment/inventories/*.json` so the two can't drift, and
-  take the user as a parameter.
+- ✅ **Removed: `lookup-hostnames.sh` hardcoded a username and the inventory
+  IPs.** It was deleted with the real inventories.
 
 ## Earlier security review
 
@@ -165,7 +157,7 @@ the code on 2026-11-12.
 | 2 | 🟡 MEDIUM | 8/10 | `sterr_logfile_backups` misspelled in `files/camel_supervisord`, so Supervisor could reject the config and trigger a rollback. | ✅ Fixed: `files/camel_supervisord:19` now reads `stderr_logfile_backups`. |
 | 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed (previously marked ❌): `valid_url()` now rejects user info, queries and fragments (`deployment/artifacts.py:17`), and `--health-url` is validated with it (`deployment/__main__.py:127`). |
 | 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ✅ Fixed: see [Security #4](#-security). |
-| 5 | 🟡 MEDIUM | 8/10 | `[[pca_api_key]]` isn't among the environment keys, so rendering fails unless it's supplied via a vars file or an encrypted secret. | ✅ Resolved: all six QA apps that use it (`branch-finder-service`, `enquiry-office-api`, `inflight-redelivery-service`, `pfw-depot-finder`, `postoffice-lat-long-loader`, `tplms-finder-service`) have it encrypted. `secrets check` now warns about any placeholder with no encrypted value. It still can't be set as an environment variable, which is fine while it stays encrypted. |
+| 5 | 🟡 MEDIUM | 8/10 | `[[pca_api_key]]` isn't among the environment keys, so rendering fails unless it's supplied via a vars file or an encrypted secret. | ✅ Resolved: the apps that used it had it encrypted (their configuration has since been replaced by samples). `secrets check` now warns about any placeholder with no encrypted value. It still can't be set as an environment variable, which is fine while it stays encrypted. |
 
 ## Suggested order
 
