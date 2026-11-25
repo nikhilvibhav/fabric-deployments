@@ -420,7 +420,7 @@ Run the test suite from the repository root:
 python -m unittest discover -s deployment/tests -v
 ```
 
-CI also lints, checks formatting, type-checks, measures branch coverage, audits dependencies and scans every commit for secrets with [gitleaks](https://github.com/gitleaks/gitleaks). Run the same checks locally:
+CI also lints, checks formatting, type-checks, shellchecks the rendered SysV init script, measures branch coverage, audits dependencies and scans every commit for secrets with [gitleaks](https://github.com/gitleaks/gitleaks). Run the same checks locally:
 
 ```sh
 uv run ruff check . && uv run ruff format --check . && uv run mypy

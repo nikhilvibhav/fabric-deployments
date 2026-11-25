@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Camel daemon init script
 #
@@ -18,12 +18,11 @@
 ### END INIT INFO
 
 # Source function library.
+# shellcheck source=/dev/null # Provided by the target's initscripts package.
 . /etc/rc.d/init.d/functions
 
 CAMEL_USER='camel'
-CAMEL_INSTALL_ROOT='/opt/camel'
 CAMEL_OPTIONS="[[jvm_options]]"
-app="[[application]]"
 CAMEL_EXEC="[[application_execute]]"
 
 CAMEL_LOG="/var/log/camel/${CAMEL_EXEC}_stdout.log"
@@ -44,10 +43,11 @@ start() {
     chown $CAMEL_USER $pidfile
     echo -n $"Starting ${CAMEL_EXEC}: "
     # if not running, start it up here, usually something like "daemon $exec"
-    pushd "${CAMEL_JAR_PATH}" >/dev/null
+    pushd "${CAMEL_JAR_PATH}" >/dev/null || return 1
+    # shellcheck disable=SC2086 # Split on purpose: daemon takes the program from $1.
     daemon --pidfile=${pidfile} --user=${CAMEL_USER} ${exec}
     retval=$?
-    popd >/dev/null
+    popd >/dev/null || return 1
     echo
     [ $retval -eq 0 ] && touch $lockfile
     return $retval
@@ -68,6 +68,7 @@ restart() {
     start
 }
 
+# shellcheck disable=SC2329 # Called as "$1" from the case statement below.
 reload() {
     restart
 }

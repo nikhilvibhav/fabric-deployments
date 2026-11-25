@@ -23,7 +23,6 @@ reached.
 | Area | Item | Effort |
 | --- | --- | --- |
 | Security | [Rotate the credentials that used to be committed](#-security) | Operational |
-| CI | [`shellcheck` for `files/camel_init`](#-cicd-workflow-githubworkflowstestsyaml) | Small |
 
 ## 🔴 Security
 
@@ -107,7 +106,7 @@ reached.
 | ✅ | No CLI smoke test | The `secrets` job runs an offline `plan` for every application under `files/`, using each stage's first role. |
 | ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 85% (`fail_under` in `pyproject.toml`). |
 | ✅ | No secret scanning | The `secret-scan` job runs a checksum-verified gitleaks over the full history. |
-| ❌ | `files/camel_init` isn't linted | Run `shellcheck` on it (it runs as root on targets). It contains `[[name]]` placeholders, so render it first or exclude those lines. |
+| ✅ | `files/camel_init` wasn't linted | A test renders it for every SysV sample app (including second artifacts) and runs shellcheck, pinned as a dev dependency. The script now declares `#!/bin/bash`, drops unused variables and fails `start` cleanly if the release directory is missing. |
 
 ## 🟡 Python code
 
@@ -176,5 +175,4 @@ the code on 2026-11-15.
 2. Set `"artifactory_allow_http": true` only on stages that need it, use
    anonymous or read-only Artifactory access there, and pin prod and DR
    deployments to the preprod digest.
-3. Shellcheck `files/camel_init`, and raise the coverage floor as
-   `remote.py` (64%) gains tests.
+3. Raise the coverage floor as `remote.py` (64%) gains tests.
