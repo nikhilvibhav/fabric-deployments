@@ -12,7 +12,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 from deployment import __main__ as cli
@@ -153,6 +153,84 @@ class ConfigurationTests(unittest.TestCase):
                 {"keep_releases": 1, "use_supervisor": False, "health_timeout": 60},
                 environ={},
             )
+
+    SETTINGS: ClassVar[Settings] = {
+        "keep_releases": 1,
+        "use_supervisor": False,
+        "health_timeout": 60,
+        "gelf_host": "logs.inventory.example",
+    }
+
+    def test_vars_file_supplies_scalars_and_rejects_nested_values(self):
+        """Apply scalar values from a vars file and reject anything else."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "vars.json"
+            path.write_text(json.dumps({"server_port": 9090, "custom": "x"}))
+            values = variables(
+                "qa", "app", "1", False, self.SETTINGS, str(path), environ={}
+            )
+            self.assertEqual((values["server_port"], values["custom"]), (9090, "x"))
+            for document in ([1, 2], {"nested": {"a": 1}}):
+                with self.subTest(document=document):
+                    path.write_text(json.dumps(document))
+                    with self.assertRaisesRegex(ValueError, "JSON object of scalar"):
+                        variables(
+                            "qa",
+                            "app",
+                            "1",
+                            False,
+                            self.SETTINGS,
+                            str(path),
+                            environ={},
+                        )
+
+    def test_environment_overrides_inventory_and_defaults(self):
+        """Prefer environment values; java_opts applies only without jvm_options."""
+        values = variables(
+            "qa",
+            "app",
+            "1",
+            False,
+            self.SETTINGS,
+            environ={
+                "gelf_host": "logs.env.example",
+                "server_port": "9090",
+                "java_opts": '"-Xmx1g"',
+            },
+        )
+        self.assertEqual(values["gelf_host"], "logs.env.example")
+        self.assertEqual(values["server_port"], "9090")
+        self.assertEqual(values["jvm_options"], "-Xmx1g")
+        values = variables(
+            "qa",
+            "app",
+            "1",
+            False,
+            self.SETTINGS,
+            environ={"java_opts": "-Xmx1g", "jvm_options": "-Xmx2g"},
+        )
+        self.assertEqual(values["jvm_options"], "-Xmx2g")
+        self.assertEqual(
+            variables("qa", "app", "1", False, self.SETTINGS, environ={})["gelf_host"],
+            "logs.inventory.example",
+        )
+
+    def test_invalid_versions_paths_and_jvm_options_are_rejected(self):
+        """Reject unsafe versions, Java/log paths and multi-line JVM options."""
+        cases = [
+            ({}, "1/2", "Invalid version"),
+            ({}, "..", "Invalid version"),
+            ({"java_bin": "bin/java"}, "1", "java_bin must be an absolute path"),
+            ({"java_bin": "/opt/../java"}, "1", "java_bin must be an absolute path"),
+            ({"camel_log_dir": "/var/log x"}, "1", "camel_log_dir must be an absolute"),
+            ({"jvm_options": "-Xmx1g\n-Xms1g"}, "1", "line breaks"),
+        ]
+        for environ, version, message in cases:
+            with (
+                self.subTest(environ=environ, version=version),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                variables("qa", "app", version, False, self.SETTINGS, environ=environ)
 
     def test_unsafe_parameters_and_boolean_typos_fail(self):
         """Reject unsafe paths and malformed boolean values."""
