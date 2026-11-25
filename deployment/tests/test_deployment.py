@@ -879,6 +879,140 @@ class OrchestrationTests(unittest.TestCase):
         first.restore.assert_not_called()
         second.restore.assert_not_called()
 
+    def three_hosts(self, action="deploy"):
+        """Return sample-prod arguments for three hosts and their recorded remotes."""
+        args = self.args(action)
+        args.stage, args.roles = "sample-prod", "app1,app2,app3"
+        timeline = MagicMock()
+        remotes = []
+        for number in range(3):
+            remote = MagicMock()
+            remote.connection.host = f"host{number}"
+            timeline.attach_mock(remote, f"host{number}")
+            remotes.append(remote)
+        return args, remotes, timeline
+
+    @staticmethod
+    def events(timeline, *methods):
+        """List 'hostN.method' for recorded calls to the given methods, in order."""
+        return [
+            name
+            for name, _, _ in timeline.mock_calls
+            if name.rpartition(".")[2] in methods
+        ]
+
+    def test_deploy_locks_every_host_before_changing_any_then_unlocks_in_reverse(self):
+        """Lock all hosts, publish host by host, prune, then close in reverse."""
+        args, remotes, timeline = self.three_hosts()
+        self.deploy_with_fake_bundle(args, *remotes)
+        self.assertEqual(
+            self.events(timeline, "lock", "prepare", "activate", "cleanup", "close"),
+            [
+                "host0.lock",
+                "host1.lock",
+                "host2.lock",
+                "host0.prepare",
+                "host0.activate",
+                "host1.prepare",
+                "host1.activate",
+                "host2.prepare",
+                "host2.activate",
+                "host0.cleanup",
+                "host1.cleanup",
+                "host2.cleanup",
+                "host2.close",
+                "host1.close",
+                "host0.close",
+            ],
+        )
+
+    def test_failed_activation_restores_in_reverse_before_unlocking(self):
+        """Restore the failed and earlier hosts newest first, then release locks."""
+        args, remotes, timeline = self.three_hosts()
+        remotes[2].activate.side_effect = RuntimeError("startup failed")
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            self.deploy_with_fake_bundle(args, *remotes)
+        self.assertEqual(
+            self.events(timeline, "restore", "close", "cleanup"),
+            [
+                "host2.restore",
+                "host1.restore",
+                "host0.restore",
+                "host2.close",
+                "host1.close",
+                "host0.close",
+            ],
+        )
+
+    def test_failed_restore_is_reported_and_other_hosts_are_still_restored(self):
+        """Keep restoring after one restore fails, and log manual recovery."""
+        args, remotes, timeline = self.three_hosts()
+        remotes[2].activate.side_effect = RuntimeError("startup failed")
+        remotes[1].restore.side_effect = OSError("ssh dropped")
+        with (
+            self.assertLogs("camel-deploy", "ERROR") as logs,
+            self.assertRaisesRegex(RuntimeError, "startup failed"),
+        ):
+            self.deploy_with_fake_bundle(args, *remotes)
+        self.assertEqual(
+            self.events(timeline, "restore"),
+            ["host2.restore", "host1.restore", "host0.restore"],
+        )
+        self.assertIn(
+            "ERROR:camel-deploy:ROLLBACK FAILED on host1; manual recovery required",
+            logs.output,
+        )
+
+    def test_unreleased_lock_after_success_fails_the_command(self):
+        """Fail a successful deployment if any lock can't be released."""
+        args, remotes, timeline = self.three_hosts()
+        remotes[1].close.side_effect = OSError("ssh dropped")
+        with self.assertRaisesRegex(RuntimeError, "locks could not be released"):
+            self.deploy_with_fake_bundle(args, *remotes)
+        self.assertEqual(
+            self.events(timeline, "close"),
+            ["host2.close", "host1.close", "host0.close"],
+        )
+
+    def test_unreleased_lock_does_not_mask_the_original_failure(self):
+        """Report the deployment failure, not the close failure that follows it."""
+        args, remotes, _ = self.three_hosts()
+        remotes[0].activate.side_effect = RuntimeError("startup failed")
+        remotes[2].close.side_effect = OSError("ssh dropped")
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            self.deploy_with_fake_bundle(args, *remotes)
+
+    def test_rollback_restores_every_host_to_its_previous_release(self):
+        """Restore each host from its current release's saved state."""
+        args, remotes, timeline = self.three_hosts("rollback")
+        for number, remote in enumerate(remotes):
+            remote.current.return_value = f"/opt/r/{number}-new"
+            remote.load_state.return_value = {"previous": f"/opt/r/{number}-old"}
+        with self.assertLogs("camel-deploy") as logs:
+            self.deploy_with_fake_bundle(args, *remotes)
+        for number, remote in enumerate(remotes):
+            remote.restore.assert_called_once_with(
+                f"/opt/r/{number}-new", {"previous": f"/opt/r/{number}-old"}
+            )
+            self.assertIn(
+                f"INFO:camel-deploy:rollback succeeded on host{number}", logs.output
+            )
+        self.assertEqual(
+            self.events(timeline, "restore", "close")[-3:],
+            ["host2.close", "host1.close", "host0.close"],
+        )
+
+    def test_start_checks_health_and_stop_does_not(self):
+        """Run the lifecycle action on every host; only start waits for health."""
+        for action, health_checks in (("start", 1), ("stop", 0)):
+            with self.subTest(action=action):
+                args, remotes, _ = self.three_hosts(action)
+                self.deploy_with_fake_bundle(args, *remotes)
+                for remote in remotes:
+                    remote.lifecycle.assert_called_once_with(action)
+                    self.assertEqual(remote.healthy.call_count, health_checks)
+                    remote.prepare.assert_not_called()
+
     def test_retention_failure_does_not_undo_successful_deployment(self):
         """Keep a healthy published release active if pruning later fails."""
         first, second = MagicMock(), MagicMock()
