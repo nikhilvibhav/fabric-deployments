@@ -19,10 +19,12 @@ import os
 import sys
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 from urllib.parse import urlsplit
 
 from . import secrets as secrets_cli
@@ -38,6 +40,9 @@ from .config import (
     variables,
 )
 from .secrets import KEY_ENV, decrypt_all, read_store
+
+if TYPE_CHECKING:
+    from .remote import Remote
 
 LOG = logging.getLogger("camel-deploy")
 # ANSI colour codes for level names; messages stay uncoloured.
@@ -190,8 +195,20 @@ def prepare_bundle(
     return bundle, metadata
 
 
-def execute(args: argparse.Namespace) -> None:
-    """Validate inputs, then plan or carry out the requested remote operation."""
+@dataclass(frozen=True)
+class Context:
+    """Validated inputs shared by every action."""
+
+    args: argparse.Namespace
+    settings: Settings
+    hosts: list[str]
+    values: Values
+    secret_names: list[str]
+    decrypted: bool
+
+
+def prepare_context(args: argparse.Namespace) -> Context:
+    """Validate inputs and build deployment variables before any connection."""
     args.release_type = release_type_for_version(args.version, args.release_type)
     settings, hosts = environment(args.stage)
     selected = select_hosts(hosts, args.roles)
@@ -232,94 +249,151 @@ def execute(args: argparse.Namespace) -> None:
             values, release_path=values["deploy_to"] + "/releases/validation"
         )
         config_files(args.stage, args.application, config_values)
-    if args.action == "plan":
-        print(
-            json.dumps(
-                {
-                    "stage": args.stage,
-                    "application": args.application,
-                    "hosts": selected,
-                    "version": args.version,
-                    "release_type": args.release_type,
-                    "artifact": args.artifact_url or args.repository,
-                    "deploy_to": values["deploy_to"],
-                    "service_manager": "supervisor"
-                    if settings["use_supervisor"]
-                    else "sysv",
-                    "health_check": "HTTP + process"
-                    if args.health_url
-                    else "process only",
-                    "secrets": {
-                        "names": secret_names,
-                        "decrypted": bool(decrypt and secret_names),
-                    },
-                    "templates": "[[name]] only",
-                },
-                indent=2,
-            )
-        )
-        return
+    return Context(args, settings, selected, values, secret_names, bool(decrypt))
+
+
+def print_plan(context: Context) -> None:
+    """Print the offline plan as JSON, without deployment variables."""
+    args = context.args
+    plan = {
+        "stage": args.stage,
+        "application": args.application,
+        "hosts": context.hosts,
+        "version": args.version,
+        "release_type": args.release_type,
+        "artifact": args.artifact_url or args.repository,
+        "deploy_to": context.values["deploy_to"],
+        "service_manager": "supervisor"
+        if context.settings["use_supervisor"]
+        else "sysv",
+        "health_check": "HTTP + process" if args.health_url else "process only",
+        "secrets": {
+            "names": context.secret_names,
+            "decrypted": context.decrypted and bool(context.secret_names),
+        },
+        "templates": "[[name]] only",
+    }
+    print(json.dumps(plan, indent=2))
+
+
+@contextmanager
+def locked_remotes(context: Context) -> Iterator[list["Remote"]]:
+    """Lock every selected host before yielding; always release in reverse order."""
     from .remote import Remote
 
-    remotes = []
-    activated = []
-    failure = None
-    published = False
+    remotes: list[Remote] = []
+    failed = False
     try:
-        # Acquire every selected host lock before publishing any release.
-        for host in selected:
+        for host in context.hosts:
             remote = Remote(
                 host,
-                values,
-                settings["use_supervisor"],
-                args.health_url,
-                settings["health_timeout"],
+                context.values,
+                context.settings["use_supervisor"],
+                context.args.health_url,
+                context.settings["health_timeout"],
             )
             remotes.append(remote)
             LOG.info("Acquiring deployment lock on %s", host)
             remote.lock()
-        if args.action != "deploy":
-            if args.action == "rollback":
-                # Check every host can roll back before restoring any of them.
-                states = []
-                for remote in remotes:
-                    current = remote.current()
-                    if not current:
-                        raise ValueError("No current release to roll back")
-                    state = remote.load_state(current)
-                    if not state["previous"]:
-                        raise ValueError("No previous release available")
-                    states.append((remote, current, state))
-                for remote, current, state in states:
-                    remote.restore(current, state)
-                    LOG.info("rollback succeeded on %s", remote.connection.host)
-            else:
-                for remote in remotes:
-                    remote.lifecycle(args.action)
-                    if args.action == "start":
-                        remote.healthy()
-                    LOG.info("%s succeeded on %s", args.action, remote.connection.host)
-            return
-        release_id = (
-            datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        yield remotes
+    except Exception:
+        failed = True
+        raise
+    finally:
+        release_locks(remotes, raise_on_error=not failed)
+
+
+def release_locks(remotes: list["Remote"], raise_on_error: bool) -> None:
+    """Close every connection; fail only if nothing else has already failed."""
+    close_errors = []
+    for remote in reversed(remotes):
+        try:
+            remote.close()
+        except Exception as exc:
+            LOG.error(
+                "Could not release lock/close connection on %s: %s",
+                remote.connection.host,
+                type(exc).__name__,
+            )
+            close_errors.append(exc)
+    if close_errors and raise_on_error:
+        raise RuntimeError(
+            "Deployment locks could not be released; manual inspection required"
         )
-        release = values["deploy_to"] + "/releases/" + release_id
+
+
+def rollback(context: Context, remotes: list["Remote"]) -> None:
+    """Return every host to its previous release, checking all hosts first."""
+    states = []
+    for remote in remotes:
+        current = remote.current()
+        if not current:
+            raise ValueError("No current release to roll back")
+        state = remote.load_state(current)
+        if not state["previous"]:
+            raise ValueError("No previous release available")
+        states.append((remote, current, state))
+    for remote, current, state in states:
+        remote.restore(current, state)
+        LOG.info("rollback succeeded on %s", remote.connection.host)
+
+
+def lifecycle(context: Context, remotes: list["Remote"]) -> None:
+    """Start or stop the service on every host; starting also waits for health."""
+    action = context.args.action
+    for remote in remotes:
+        remote.lifecycle(action)
+        if action == "start":
+            remote.healthy()
+        LOG.info("%s succeeded on %s", action, remote.connection.host)
+
+
+def build_bundle(
+    context: Context, workspace: Path, release: str
+) -> tuple[Path, dict[str, str], dict[str, bytes]]:
+    """Download the artifact and render configuration once for every host."""
+    args = context.args
+    bundle, metadata = prepare_bundle(args, context.values, workspace)
+    # Release paths are deliberately identical on every selected host, so
+    # configuration is rendered once for all of them.
+    config = bundle / "config"
+    config.mkdir(exist_ok=True)
+    for name, content in config_files(
+        args.stage, args.application, dict(context.values, release_path=release)
+    ).items():
+        (config / name).write_bytes(content)
+    return bundle, metadata, shared_files(args.stage, args.application)
+
+
+def restore_activated(
+    activated: list[tuple["Remote", dict[str, Any]]], release: str
+) -> None:
+    """Undo activated hosts newest first, continuing past hosts that fail."""
+    for remote, state in reversed(activated):
+        try:
+            remote.restore(release, state)
+            LOG.error("Restored previous deployment on %s", remote.connection.host)
+        except Exception:
+            LOG.error(
+                "ROLLBACK FAILED on %s; manual recovery required",
+                remote.connection.host,
+            )
+
+
+def deploy(context: Context, remotes: list["Remote"]) -> None:
+    """Publish a new release host by host, restoring every host if one fails."""
+    args = context.args
+    release_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    release = context.values["deploy_to"] + "/releases/" + release_id
+    activated: list[tuple[Remote, dict[str, Any]]] = []
+    published = False
+    try:
         with tempfile.TemporaryDirectory(prefix="camel-deploy-") as temporary:
-            workspace = Path(temporary)
-            bundle, metadata = prepare_bundle(args, values, workspace)
-            # Release paths are deliberately identical on every selected host, so
-            # configuration is rendered once for all of them.
-            config = bundle / "config"
-            config.mkdir(exist_ok=True)
-            for name, content in config_files(
-                args.stage, args.application, dict(values, release_path=release)
-            ).items():
-                (config / name).write_bytes(content)
-            shared = shared_files(args.stage, args.application)
+            bundle, metadata, shared = build_bundle(context, Path(temporary), release)
             for remote in remotes:
                 LOG.info("Uploading %s to %s", release_id, remote.connection.host)
                 state = remote.prepare(bundle, release, metadata, shared)
-                activated.append((remote, release, state))
+                activated.append((remote, state))
                 LOG.info("Publishing %s on %s", release_id, remote.connection.host)
                 remote.activate(release)
         # Publishing is committed; pruning failure must not undo a healthy deployment.
@@ -335,41 +409,34 @@ def execute(args: argparse.Namespace) -> None:
                 "Pin this build in later stages with: --sha256 %s", metadata["sha256"]
             )
         for remote in remotes:
-            remote.cleanup(settings["keep_releases"])
+            remote.cleanup(context.settings["keep_releases"])
         LOG.info("Deployment succeeded: %s", release_id)
-    except Exception as exc:
-        failure = exc
+    except Exception:
         # Restore all published hosts, including the one whose activation failed.
-        for remote, release, state in reversed(activated):
-            try:
-                remote.restore(release, state)
-                LOG.error("Restored previous deployment on %s", remote.connection.host)
-            except Exception:
-                LOG.error(
-                    "ROLLBACK FAILED on %s; manual recovery required",
-                    remote.connection.host,
-                )
+        restore_activated(activated, release)
         if published:
             LOG.error(
                 "Release was published and remains active; post-deployment cleanup failed"
             )
         raise
-    finally:
-        close_errors = []
-        for remote in reversed(remotes):
-            try:
-                remote.close()
-            except Exception as exc:
-                LOG.error(
-                    "Could not release lock/close connection on %s: %s",
-                    remote.connection.host,
-                    type(exc).__name__,
-                )
-                close_errors.append(exc)
-        if close_errors and failure is None:
-            raise RuntimeError(
-                "Deployment locks could not be released; manual inspection required"
-            )
+
+
+ACTIONS: dict[str, Callable[[Context, list["Remote"]], None]] = {
+    "deploy": deploy,
+    "rollback": rollback,
+    "start": lifecycle,
+    "stop": lifecycle,
+}
+
+
+def execute(args: argparse.Namespace) -> None:
+    """Validate inputs, then plan or carry out the requested remote operation."""
+    context = prepare_context(args)
+    if args.action == "plan":
+        print_plan(context)
+        return
+    with locked_remotes(context) as remotes:
+        ACTIONS[args.action](context, remotes)
 
 
 def main(argv: list[str] | None = None) -> int:
