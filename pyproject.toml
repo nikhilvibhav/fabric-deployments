@@ -28,8 +28,9 @@ dev = [
 package = false
 
 [tool.ruff.lint]
-# Defaults plus bugbear, bandit (security), pyupgrade and import sorting.
-extend-select = ["B", "S", "UP", "I"]
+# Defaults plus bugbear, bandit (security), pyupgrade and import sorting, and
+# limits on function complexity, branches and statements.
+extend-select = ["B", "S", "UP", "I", "C901", "PLR0912", "PLR0915"]
 ignore = ["BLE001"]
 
 [tool.mypy]
@@ -68,6 +69,6 @@ omit = ["deployment/tests/*"]
 
 [tool.coverage.report]
 # CI fails if branch coverage drops below this; raise it as tests are added.
-fail_under = 80
+fail_under = 82
 show_missing = true
 skip_covered = true
