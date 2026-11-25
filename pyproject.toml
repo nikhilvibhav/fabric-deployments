@@ -69,6 +69,6 @@ omit = ["deployment/tests/*"]
 
 [tool.coverage.report]
 # CI fails if branch coverage drops below this; raise it as tests are added.
-fail_under = 82
+fail_under = 85
 show_missing = true
 skip_covered = true
