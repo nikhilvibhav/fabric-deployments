@@ -167,7 +167,7 @@ def select_hosts(hosts: list[Host], roles: str) -> list[str]:
     return [host.address for host in hosts if wanted.intersection(host.roles)]
 
 
-def variables(
+def variables(  # noqa: C901, PLR0912
     stage: str,
     application: str,
     version: str,

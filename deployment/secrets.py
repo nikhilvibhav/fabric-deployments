@@ -344,7 +344,7 @@ def plaintext_properties(content: bytes) -> Iterator[str]:
             yield key
 
 
-def check_store(
+def check_store(  # noqa: C901
     stage: str,
     application: str,
     root: Path,
@@ -511,7 +511,7 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def run(argv: list[str], root: Path = ROOT) -> None:
+def run(argv: list[str], root: Path = ROOT) -> None:  # noqa: C901, PLR0912
     """Execute a secret-management command against the selected repository root."""
     args = parser().parse_args(argv)
     if args.command == "keygen":

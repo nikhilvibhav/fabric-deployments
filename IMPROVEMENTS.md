@@ -24,7 +24,7 @@ reached.
 | --- | --- | --- |
 | Security | [Rotate the credentials that used to be committed](#-security) | Operational |
 | CI | [`shellcheck` for `files/camel_init`](#-cicd-workflow-githubworkflowstestsyaml) | Small |
-| Code | [`execute()` is long](#-python-code) | Medium |
+| Code | [`variables()`, `check_store()` and `secrets.run()` exceed the complexity limits](#-python-code) | Medium |
 
 ## 🔴 Security
 
@@ -106,14 +106,14 @@ reached.
 | ✅ | No `concurrency:` group | Superseded runs of the same branch or PR are cancelled. |
 | ✅ | Lint target missed `tasks.py` | Ruff checks and format-checks the whole repository. |
 | ✅ | No CLI smoke test | The `secrets` job runs an offline `plan` for every application under `files/`, using each stage's first role. |
-| ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 80% (`fail_under` in `pyproject.toml`). |
+| ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 82% (`fail_under` in `pyproject.toml`). |
 | ✅ | No secret scanning | The `secret-scan` job runs a checksum-verified gitleaks over the full history. |
 | ❌ | `files/camel_init` isn't linted | Run `shellcheck` on it (it runs as root on targets). It contains `[[name]]` placeholders, so render it first or exclude those lines. |
 
 ## 🟡 Python code
 
 - ✅ **Fixed: `unseal` errors showed a traceback.** The `secrets` subcommand
-  now catches `TypeError` (`deployment/__main__.py:382`).
+  now catches `TypeError` (`deployment/__main__.py:449`).
 - ✅ **Fixed: missing `ARTIFACTORY_PASSWORD` raised `KeyError`.** It is now a
   `ValueError` naming the missing variable.
 - ✅ **Fixed: `config_files()` ran once per host.** Configuration and shared
@@ -122,9 +122,14 @@ reached.
   first, then restores them in one pass over the collected states.
 - ✅ **Fixed: health-check timing wasn't configurable.** Each inventory can
   set `health_timeout` (seconds, 5–1800, default 60); checks run every 5 s.
-- ❌ **`execute()` is long** (ruff PLR0912/PLR0915). Splitting it into
-  `_plan`, `_lifecycle`, `_rollback` and `_deploy` would make the recovery path
-  easier to review and test.
+- ✅ **Fixed: `execute()` was 182 lines.** It now prepares a `Context`, then
+  either prints the plan or runs `deploy`, `rollback` or `lifecycle` inside
+  `locked_remotes()`, which owns acquiring and releasing host locks. Tests
+  pin down the lock, restore and unlock order first.
+- ⚠️ **Complexity limits are now enforced** (ruff `C901`, `PLR0912`,
+  `PLR0915`). Three existing functions exceed them and carry a `noqa` until
+  they're split: `variables()` (`deployment/config.py`), and `check_store()`
+  and `run()` (`deployment/secrets.py`).
 - ✅ **Done: no hardcoded Artifactory.** The default repository URL (an
   internal IP) and Maven group are gone; each inventory sets
   `artifactory_url` and `artifact_group`, `--repository` or `--artifact-url`
@@ -162,7 +167,7 @@ the code on 2026-11-15.
 | --- | --- | --- | --- | --- |
 | 1 | 🟠 HIGH | 8/10 | Default Artifactory URL is HTTP and SHA-256 verification is optional, so a JAR could be replaced in transit. | ⚠️ Accepted risk, downgraded to MEDIUM. There is no default URL any more, but the real Artifactory is HTTP-only. Mitigations in [Security #3](#-security). |
 | 2 | 🟡 MEDIUM | 8/10 | `sterr_logfile_backups` misspelled in `files/camel_supervisord`, so Supervisor could reject the config and trigger a rollback. | ✅ Fixed: `files/camel_supervisord:19` reads `stderr_logfile_backups`. |
-| 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed: `valid_url()` rejects user info, queries and fragments (`deployment/artifacts.py:24`), and `--health-url` is validated with it (`deployment/__main__.py:228`). |
+| 3 | 🟡 MEDIUM | 9/10 | `valid_url()` permitted credentials, query strings and fragments; health-check URLs could leak tokens into CI logs through failed remote command messages. | ✅ Fixed: `valid_url()` rejects user info, queries and fragments (`deployment/artifacts.py:24`), and `--health-url` is validated with it (`deployment/__main__.py:245`). |
 | 4 | 🟡 MEDIUM | 9/10 | Rekey rewrites stores in place before replacing the public key, so an interruption leaves mixed keys. | ✅ Fixed: see [Security #4](#-security). |
 | 5 | 🟡 MEDIUM | 8/10 | `[[pca_api_key]]` isn't among the environment keys, so rendering fails unless it's supplied via a vars file or an encrypted secret. | ✅ Resolved: the apps that used it had it encrypted, and their configuration has since been removed. `secrets check` warns about any placeholder with no encrypted value. |
 
@@ -172,5 +177,6 @@ the code on 2026-11-15.
 2. Set `"artifactory_allow_http": true` only on stages that need it, use
    anonymous or read-only Artifactory access there, and pin prod and DR
    deployments to the preprod digest.
-3. Split `execute()`, raising the coverage floor as `remote.py` (64%) gains
-   tests, then shellcheck `files/camel_init`.
+3. Split `variables()`, `check_store()` and `secrets.run()` and drop their
+   `noqa`, raise the coverage floor as `remote.py` (64%) gains tests, then
+   shellcheck `files/camel_init`.
