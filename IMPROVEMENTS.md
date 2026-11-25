@@ -24,7 +24,6 @@ reached.
 | --- | --- | --- |
 | Security | [Rotate the credentials that used to be committed](#-security) | Operational |
 | CI | [`shellcheck` for `files/camel_init`](#-cicd-workflow-githubworkflowstestsyaml) | Small |
-| Code | [`variables()`, `check_store()` and `secrets.run()` exceed the complexity limits](#-python-code) | Medium |
 
 ## 🔴 Security
 
@@ -106,7 +105,7 @@ reached.
 | ✅ | No `concurrency:` group | Superseded runs of the same branch or PR are cancelled. |
 | ✅ | Lint target missed `tasks.py` | Ruff checks and format-checks the whole repository. |
 | ✅ | No CLI smoke test | The `secrets` job runs an offline `plan` for every application under `files/`, using each stage's first role. |
-| ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 82% (`fail_under` in `pyproject.toml`). |
+| ✅ | Coverage wasn't measured | Tests run under `coverage` with branch coverage; the report goes to the job summary and CI fails below 85% (`fail_under` in `pyproject.toml`). |
 | ✅ | No secret scanning | The `secret-scan` job runs a checksum-verified gitleaks over the full history. |
 | ❌ | `files/camel_init` isn't linted | Run `shellcheck` on it (it runs as root on targets). It contains `[[name]]` placeholders, so render it first or exclude those lines. |
 
@@ -126,10 +125,10 @@ reached.
   either prints the plan or runs `deploy`, `rollback` or `lifecycle` inside
   `locked_remotes()`, which owns acquiring and releasing host locks. Tests
   pin down the lock, restore and unlock order first.
-- ⚠️ **Complexity limits are now enforced** (ruff `C901`, `PLR0912`,
-  `PLR0915`). Three existing functions exceed them and carry a `noqa` until
-  they're split: `variables()` (`deployment/config.py`), and `check_store()`
-  and `run()` (`deployment/secrets.py`).
+- ✅ **Done: complexity limits are enforced** (ruff `C901`, `PLR0912`,
+  `PLR0915`) with no exceptions. `variables()`, `check_store()` and the
+  `secrets` command dispatcher were split to meet them, after tests pinned
+  down their behaviour.
 - ✅ **Done: no hardcoded Artifactory.** The default repository URL (an
   internal IP) and Maven group are gone; each inventory sets
   `artifactory_url` and `artifact_group`, `--repository` or `--artifact-url`
@@ -177,6 +176,5 @@ the code on 2026-11-15.
 2. Set `"artifactory_allow_http": true` only on stages that need it, use
    anonymous or read-only Artifactory access there, and pin prod and DR
    deployments to the preprod digest.
-3. Split `variables()`, `check_store()` and `secrets.run()` and drop their
-   `noqa`, raise the coverage floor as `remote.py` (64%) gains tests, then
-   shellcheck `files/camel_init`.
+3. Shellcheck `files/camel_init`, and raise the coverage floor as
+   `remote.py` (64%) gains tests.

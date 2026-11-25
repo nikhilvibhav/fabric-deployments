@@ -1,5 +1,6 @@
 """Tests for encrypted secret stores, the secrets CLI and their use during deployment."""
 
+import argparse
 import io
 import json
 import os
@@ -164,7 +165,11 @@ class SecretStoreTests(TemporaryStoreTestCase):
             secrets.rekey("qa", self.key, self.root / "qa.new.private.key", self.root)
 
         errors, _ = secrets.check("qa", "app", self.root)
-        self.assertTrue(any("different key than public.key" in e for e in errors))
+        self.assertIn(
+            "qa/app: encrypted with a different key than public.key; merge the "
+            "latest rekey, or restore an interrupted one with git checkout",
+            errors,
+        )
         with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
             self.store("app", "other", "value")
         with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
@@ -279,6 +284,93 @@ class CheckAndVerifyTests(TemporaryStoreTestCase):
             secrets.run(argv, self.root)
         return output.getvalue()
 
+    def cli(self, *argv):
+        """Run a secrets subcommand against the temporary root and return stdout."""
+        with redirect_stdout(io.StringIO()) as output:
+            secrets.run(list(argv), self.root)
+        return output.getvalue()
+
+    def test_every_cli_subcommand_has_a_handler(self):
+        """Keep the command table in step with the argument parser."""
+        subcommands = next(
+            action
+            for action in secrets.parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        self.assertEqual(set(subcommands.choices), set(secrets.COMMANDS))
+
+    def test_cli_keygen_and_rekey_say_what_to_commit(self):
+        """Tell the operator which files to commit after keygen and rekey."""
+        qe_key = self.root / "qe.private.key"
+        self.assertEqual(
+            self.cli("keygen", "--stage", "qe", "--private-key-out", str(qe_key)),
+            "Created secrets/qe/public.key; commit it.\n"
+            f"Store {qe_key} securely and back it up offline.\n",
+        )
+        self.store("app", "db_password", "value")
+        output = self.cli(
+            "rekey",
+            "--stage",
+            "qa",
+            "--old-key",
+            str(self.key),
+            "--private-key-out",
+            str(self.root / "qa-new.private.key"),
+        )
+        self.assertTrue(
+            output.startswith(
+                "Re-encrypted 1 application file(s) for qa. "
+                "Commit all changes under secrets/qa together."
+            ),
+            output,
+        )
+
+    def test_cli_unset_removes_a_name_and_rejects_unknown_ones(self):
+        """Remove only an existing name, leaving the others encrypted."""
+        self.store("app", "first", "1")
+        self.store("app", "second", "2")
+        self.assertEqual(
+            self.cli(
+                "unset", "--stage", "qa", "--application", "app", "--name", "first"
+            ),
+            "Removed first from qa/app\n",
+        )
+        self.assertEqual(list(secrets.read_store("qa", "app", self.root)), ["second"])
+        with self.assertRaisesRegex(ValueError, "first is not set"):
+            self.cli(
+                "unset", "--stage", "qa", "--application", "app", "--name", "first"
+            )
+
+    def test_cli_check_prints_warnings_and_requires_stage_with_application(self):
+        """Print each warning, then a passing summary; --application needs --stage."""
+        self.config("db.password=[[db_password]]\napi.key=[[api_key]]\n")
+        self.store("app", "db_password", "value")
+        self.assertEqual(
+            self.cli("check", "--stage", "qa"),
+            "WARNING qa/app: [[api_key]] is not an encrypted secret; "
+            "it must come from the environment or --vars-file\n"
+            "Secrets check passed with 1 warning(s)\n",
+        )
+        with self.assertRaisesRegex(ValueError, "--application requires --stage"):
+            self.cli("check", "--application", "app")
+
+    def test_application_without_secrets_is_an_error_when_checked_by_name(self):
+        """Report an application checked by name that has no encrypted store."""
+        self.config("db.password=[[db_password]]\n")
+        errors, _ = secrets.check("qa", "app", self.root)
+        self.assertIn("qa/app: no encrypted secrets", errors)
+
+    def test_cli_verify_needs_a_key_and_a_known_name(self):
+        """Fail verification without a key or for a name that isn't stored."""
+        self.store("app", "db_password", "value")
+        with (
+            patch.dict(os.environ, {secrets.KEY_ENV: ""}),
+            self.assertRaisesRegex(ValueError, "Supply --secrets-key"),
+        ):
+            self.cli("verify", "--stage", "qa", "--application", "app")
+        with self.assertRaisesRegex(ValueError, "missing is not set"):
+            self.verify("--name", "missing")
+
     def test_referenced_well_formed_secret_passes(self):
         """Accept a valid encrypted secret referenced by an application template."""
         self.config("db.password=[[db_password]]\n")
@@ -296,7 +388,10 @@ class CheckAndVerifyTests(TemporaryStoreTestCase):
         """Report stores whose application configuration directory is missing."""
         self.store("missing-app", "db_password", "value")
         errors, _ = secrets.check(root=self.root)
-        self.assertTrue(any("Configuration directory is missing" in e for e in errors))
+        self.assertIn(
+            "qa/missing-app: Configuration directory is missing: qa/missing-app",
+            errors,
+        )
 
     def test_malformed_or_truncated_ciphertext_is_an_error(self):
         """Report malformed base64 and ciphertext too short to be a sealed value."""

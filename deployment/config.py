@@ -167,7 +167,71 @@ def select_hosts(hosts: list[Host], roles: str) -> list[str]:
     return [host.address for host in hosts if wanted.intersection(host.roles)]
 
 
-def variables(  # noqa: C901, PLR0912
+def load_vars_file(path: str) -> Values:
+    """Read a JSON object of scalar template values from a variables file."""
+    supplied = json.loads(Path(path).read_text())
+    if not isinstance(supplied, dict) or any(
+        not isinstance(value, (str, int, float, bool)) for value in supplied.values()
+    ):
+        raise ValueError("Variables file must contain a JSON object of scalar values")
+    return supplied
+
+
+def apply_environment(
+    values: Values, environ: Mapping[str, str], secret_values: Mapping[str, str]
+) -> None:
+    """Overlay known environment variables, then decrypted secrets, onto values."""
+    environment_keys = set(DEFAULTS) | SECRET_KEYS | {"gelf_host"}
+    for key in environment_keys:
+        if key in environ:
+            values[key] = environ[key]
+    for key, value in secret_values.items():
+        # Refuse ambiguity rather than letting a stale job variable shadow a rotated secret.
+        if key in environment_keys and key in environ:
+            raise ValueError(
+                f"{key} is set both as an encrypted secret and an environment variable"
+            )
+        values[key] = value
+    if "java_opts" in environ and "jvm_options" not in environ:
+        values["jvm_options"] = environ["java_opts"]
+
+
+def unquote(options: str) -> str:
+    """Remove one matching pair of quotes wrapping JVM options."""
+    if len(options) >= 2 and options[0] == options[-1] and options[0] in "'\"":
+        return options[1:-1]
+    return options
+
+
+def identity(stage: str, application: str, version: str, second: bool) -> Values:
+    """Validate the release identity and derive its service name and directory."""
+    relative_path(application, "application")
+    if not SEGMENT.fullmatch(version) or version in {".", ".."}:
+        raise ValueError("Invalid version")
+    if second and version == "latest":
+        raise ValueError("A second artifact requires an explicit version")
+    suffix = f"-{version}" if second else ""
+    return {
+        "stage": stage,
+        "application": application,
+        "version": version,
+        "application_name": PurePosixPath(application).name,
+        "application_execute": PurePosixPath(application).name + suffix,
+        "deploy_to": f"/opt/camel/{application}" + suffix,
+    }
+
+
+def validate_runtime(values: Values) -> None:
+    """Reject Java and log paths or JVM options that are unsafe on the target."""
+    for key in ("java_bin", "camel_log_dir"):
+        path = str(values[key])
+        if not re.fullmatch(r"/[A-Za-z0-9_/.-]+", path) or ".." in path.split("/"):
+            raise ValueError(f"{key} must be an absolute path without whitespace")
+    if any(character in values["jvm_options"] for character in "\r\n"):
+        raise ValueError("JVM options cannot contain line breaks")
+
+
+def variables(
     stage: str,
     application: str,
     version: str,
@@ -182,53 +246,11 @@ def variables(  # noqa: C901, PLR0912
     values = dict(DEFAULTS)
     values.update({key: settings[key] for key in ("gelf_host",) if key in settings})
     if vars_file:
-        supplied = json.loads(Path(vars_file).read_text())
-        if not isinstance(supplied, dict) or any(
-            not isinstance(value, (str, int, float, bool))
-            for value in supplied.values()
-        ):
-            raise ValueError(
-                "Variables file must contain a JSON object of scalar values"
-            )
-        values.update(supplied)
-    environment_keys = set(DEFAULTS) | SECRET_KEYS | {"gelf_host"}
-    for key in environment_keys:
-        if key in environ:
-            values[key] = environ[key]
-    for key, value in (secret_values or {}).items():
-        # Refuse ambiguity rather than letting a stale job variable shadow a rotated secret.
-        if key in environment_keys and key in environ:
-            raise ValueError(
-                f"{key} is set both as an encrypted secret and an environment variable"
-            )
-        values[key] = value
-    if "java_opts" in environ and "jvm_options" not in environ:
-        values["jvm_options"] = environ["java_opts"]
-    options = str(values["jvm_options"])
-    if len(options) >= 2 and options[0] == options[-1] and options[0] in "'\"":
-        options = options[1:-1]
-    values["jvm_options"] = options
-    relative_path(application, "application")
-    if not SEGMENT.fullmatch(version) or version in {".", ".."}:
-        raise ValueError("Invalid version")
-    if second and version == "latest":
-        raise ValueError("A second artifact requires an explicit version")
-    values.update(
-        stage=stage,
-        application=application,
-        version=version,
-        application_name=PurePosixPath(application).name,
-        application_execute=PurePosixPath(application).name
-        + (f"-{version}" if second else ""),
-        deploy_to=f"/opt/camel/{application}" + (f"-{version}" if second else ""),
-    )
-    for key in ("java_bin", "camel_log_dir"):
-        if not re.fullmatch(r"/[A-Za-z0-9_/.-]+", str(values[key])) or ".." in str(
-            values[key]
-        ).split("/"):
-            raise ValueError(f"{key} must be an absolute path without whitespace")
-    if any(character in options for character in "\r\n"):
-        raise ValueError("JVM options cannot contain line breaks")
+        values.update(load_vars_file(vars_file))
+    apply_environment(values, environ, secret_values or {})
+    values["jvm_options"] = unquote(str(values["jvm_options"]))
+    values.update(identity(stage, application, version, second))
+    validate_runtime(values)
     return values
 
 
