@@ -1,11 +1,20 @@
 """Tests for ``[[name]]`` template rendering and configuration file selection."""
 
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from deployment.config import ROOT, config_files, render, render_file
+from deployment.config import (
+    ROOT,
+    config_files,
+    environment,
+    render,
+    render_file,
+    variables,
+)
 
 
 def write(path, data):
@@ -83,6 +92,37 @@ class TemplateTests(unittest.TestCase):
         for name in ("camel_init", "camel_supervisord"):
             content = render_file(ROOT / "files" / name, values)
             self.assertNotIn(b"[[", content)
+
+    @unittest.skipUnless(shutil.which("shellcheck"), "shellcheck is a dev dependency")
+    def test_rendered_sysv_init_script_passes_shellcheck(self):
+        """Lint camel_init as rendered for every SysV sample application."""
+        shellcheck = shutil.which("shellcheck") or "shellcheck"
+        cases = [
+            (stage, application, second)
+            for stage in ("sample-prod",)
+            for application in ("hello-service", "orders-service")
+            for second in (False, True)
+        ]
+        for stage, application, second in cases:
+            with (
+                self.subTest(stage=stage, application=application, second=second),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                settings, _ = environment(stage)
+                self.assertFalse(settings["use_supervisor"])
+                values = variables(
+                    stage, application, "1.0.0", second, settings, environ={}
+                )
+                values["release_path"] = values["deploy_to"] + "/releases/1-abc"
+                script = Path(directory) / "camel_init"
+                script.write_bytes(render_file(ROOT / "files" / "camel_init", values))
+                result = subprocess.run(  # noqa: S603 - fixed arguments
+                    [shellcheck, str(script)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
 
 
 if __name__ == "__main__":

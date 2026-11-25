@@ -1,6 +1,6 @@
 [project]
 name = "fabric-deployments"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python CLI that deploys JAR services over SSH with Fabric: atomic releases, automatic rollback, and Git-stored secrets encrypted with libsodium."
 readme = "README.md"
 license = "MIT"
@@ -20,6 +20,7 @@ dev = [
     "coverage>=7.17.3",
     "mypy>=2.4.1",
     "ruff>=0.17.4",
+    "shellcheck-py>=0.11.0.1",
     "types-paramiko>=5.1.0",
 ]
 
