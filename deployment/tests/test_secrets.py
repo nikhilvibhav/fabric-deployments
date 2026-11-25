@@ -165,7 +165,11 @@ class SecretStoreTests(TemporaryStoreTestCase):
             secrets.rekey("qa", self.key, self.root / "qa.new.private.key", self.root)
 
         errors, _ = secrets.check("qa", "app", self.root)
-        self.assertTrue(any("different key than public.key" in e for e in errors))
+        self.assertIn(
+            "qa/app: encrypted with a different key than public.key; merge the "
+            "latest rekey, or restore an interrupted one with git checkout",
+            errors,
+        )
         with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
             self.store("app", "other", "value")
         with self.assertRaisesRegex(ValueError, "encrypted with a different key"):
@@ -384,7 +388,10 @@ class CheckAndVerifyTests(TemporaryStoreTestCase):
         """Report stores whose application configuration directory is missing."""
         self.store("missing-app", "db_password", "value")
         errors, _ = secrets.check(root=self.root)
-        self.assertTrue(any("Configuration directory is missing" in e for e in errors))
+        self.assertIn(
+            "qa/missing-app: Configuration directory is missing: qa/missing-app",
+            errors,
+        )
 
     def test_malformed_or_truncated_ciphertext_is_an_error(self):
         """Report malformed base64 and ciphertext too short to be a sealed value."""

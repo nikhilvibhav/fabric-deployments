@@ -79,7 +79,7 @@ def stale_store_error(stage: str, application: str) -> ValueError:
     return ValueError(
         f"secrets/{stage}/{application}.json was encrypted with a different key "
         f"than secrets/{stage}/public.key. Merge the latest rekey into your branch, "
-        f"or, if a rekey was interruped, restore with: git checkout -- secrets/{stage}"
+        f"or, if a rekey was interrupted, restore with: git checkout -- secrets/{stage}"
     )
 
 
@@ -362,13 +362,13 @@ def check_store(
     sealed = {} if data is None else data["values"]
     if data is not None and expected_key_id and data["key_id"] != expected_key_id:
         errors.append(
-            f"{label} encrypted with a different key than public.key; "
-            "merge the latest rekey or restore an interruped one with git checkout"
+            f"{label}: encrypted with a different key than public.key; "
+            "merge the latest rekey, or restore an interrupted one with git checkout"
         )
     try:
         used, files = template_names(stage, application, root)
     except (ValueError, OSError) as exc:
-        errors.append(f"{label}:{exc}")
+        errors.append(f"{label}: {exc}")
         return
     if not sealed:
         errors.append(f"{label}: no encrypted secrets")
