@@ -16,7 +16,7 @@ import re
 import stat
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -344,7 +344,7 @@ def plaintext_properties(content: bytes) -> Iterator[str]:
             yield key
 
 
-def check_store(  # noqa: C901
+def check_store(
     stage: str,
     application: str,
     root: Path,
@@ -372,6 +372,19 @@ def check_store(  # noqa: C901
         return
     if not sealed:
         errors.append(f"{label}: no encrypted secrets")
+    check_ciphertexts(stage, application, sealed, used, errors)
+    check_placeholders(label, sealed, used, files, warnings)
+
+
+def check_ciphertexts(
+    stage: str,
+    application: str,
+    sealed: dict[str, Any],
+    used: set[str],
+    errors: list[str],
+) -> None:
+    """Report malformed or truncated ciphertext, and secrets no template uses."""
+    label = f"{stage}/{application}"
     for name, ciphertext in sorted(sealed.items()):
         try:
             validate_name(name)
@@ -389,6 +402,16 @@ def check_store(  # noqa: C901
             errors.append(f"{label}: {exc}")
         if name not in used:
             errors.append(f"{label}: secret {name} is not used by any [[{name}]]")
+
+
+def check_placeholders(
+    label: str,
+    sealed: dict[str, Any],
+    used: set[str],
+    files: dict[str, bytes],
+    warnings: list[str],
+) -> None:
+    """Warn about placeholders without secrets and plaintext sensitive properties."""
     provided = set(sealed) | set(DEFAULTS) | RESERVED | {"gelf_host"}
     for name in sorted(used - provided):
         warnings.append(
@@ -511,68 +534,99 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def run(argv: list[str], root: Path = ROOT) -> None:  # noqa: C901, PLR0912
+def run_keygen(args: argparse.Namespace, root: Path) -> None:
+    """Create a stage key pair and say which file to commit."""
+    keygen(args.stage, args.private_key_out, root)
+    print(
+        f"Created secrets/{args.stage}/public.key; commit it.\n"
+        f"Store {args.private_key_out} securely and back it up offline."
+    )
+
+
+def run_rekey(args: argparse.Namespace, root: Path) -> None:
+    """Re-encrypt a stage with a new key pair and say what to commit."""
+    count = rekey(args.stage, args.old_key, args.private_key_out, root)
+    print(
+        f"Re-encrypted {count} application file(s) for {args.stage}. Commit all "
+        f"changes under secrets/{args.stage} together. Rotate the secret values too if the old key leaked."
+    )
+
+
+def run_set(args: argparse.Namespace, root: Path) -> None:
+    """Encrypt a value read from the terminal or standard input."""
+    validate_name(args.name)
+    public_key = load_public_key(args.stage, root)
+    value = read_value(args.value_from)
+    values = read_store(args.stage, args.application, root)
+    values[args.name] = seal(public_key, args.stage, args.application, args.name, value)
+    write_store(args.stage, args.application, values, root)
+    print(f"Encrypted {args.name} for {args.stage}/{args.application}")
+
+
+def run_unset(args: argparse.Namespace, root: Path) -> None:
+    """Remove one encrypted value."""
+    values = read_store(args.stage, args.application, root)
+    if args.name not in values:
+        raise ValueError(f"{args.name} is not set")
+    del values[args.name]
+    write_store(args.stage, args.application, values, root)
+    print(f"Removed {args.name} from {args.stage}/{args.application}")
+
+
+def run_list(args: argparse.Namespace, root: Path) -> None:
+    """Print the names of an application's encrypted values."""
+    for name in sorted(read_store(args.stage, args.application, root)):
+        print(name)
+
+
+def run_check(args: argparse.Namespace, root: Path) -> None:
+    """Validate stores without a key, failing if any errors are found."""
+    if args.application and not args.stage:
+        raise ValueError("--application requires --stage")
+    errors, warnings = check(args.stage, args.application, root)
+    for message in warnings:
+        print(f"WARNING {message}")
+    for message in errors:
+        print(f"ERROR {message}")
+    if errors:
+        raise ValueError(f"Secrets check found {len(errors)} error(s)")
+    print(f"Secrets check passed with {len(warnings)} warning(s)")
+
+
+def run_verify(args: argparse.Namespace, root: Path) -> None:
+    """Decrypt values with the stage key, printing names but never values."""
+    if not args.secrets_key:
+        raise ValueError(f"Supply --secrets-key or {KEY_ENV}")
+    if args.compare and not args.name:
+        raise ValueError("--compare requires --name")
+    # Decrypting every value also proves the whole file is consistent.
+    values = decrypt_all(args.stage, args.application, args.secrets_key, root)
+    if args.name and args.name not in values:
+        raise ValueError(f"{args.name} is not set")
+    # Never print values: this output can end up in terminals and CI logs.
+    if args.compare:
+        compare_value(args.name, values[args.name])
+        print(f"{args.name}: matches the expected value")
+        return
+    for name in [args.name] if args.name else sorted(values):
+        print(f"{name}: decrypted")
+    print(
+        f"{len(values)} secret(s) decrypted successfully for {args.stage}/{args.application}"
+    )
+
+
+COMMANDS: dict[str, Callable[[argparse.Namespace, Path], None]] = {
+    "keygen": run_keygen,
+    "rekey": run_rekey,
+    "set": run_set,
+    "unset": run_unset,
+    "list": run_list,
+    "check": run_check,
+    "verify": run_verify,
+}
+
+
+def run(argv: list[str], root: Path = ROOT) -> None:
     """Execute a secret-management command against the selected repository root."""
     args = parser().parse_args(argv)
-    if args.command == "keygen":
-        keygen(args.stage, args.private_key_out, root)
-        print(
-            f"Created secrets/{args.stage}/public.key; commit it.\n"
-            f"Store {args.private_key_out} securely and back it up offline."
-        )
-    elif args.command == "rekey":
-        count = rekey(args.stage, args.old_key, args.private_key_out, root)
-        print(
-            f"Re-encrypted {count} application file(s) for {args.stage}. Commit all "
-            f"changes under secrets/{args.stage} together. Rotate the secret values too if the old key leaked."
-        )
-    elif args.command == "set":
-        validate_name(args.name)
-        public_key = load_public_key(args.stage, root)
-        value = read_value(args.value_from)
-        values = read_store(args.stage, args.application, root)
-        values[args.name] = seal(
-            public_key, args.stage, args.application, args.name, value
-        )
-        write_store(args.stage, args.application, values, root)
-        print(f"Encrypted {args.name} for {args.stage}/{args.application}")
-    elif args.command == "unset":
-        values = read_store(args.stage, args.application, root)
-        if args.name not in values:
-            raise ValueError(f"{args.name} is not set")
-        del values[args.name]
-        write_store(args.stage, args.application, values, root)
-        print(f"Removed {args.name} from {args.stage}/{args.application}")
-    elif args.command == "list":
-        for name in sorted(read_store(args.stage, args.application, root)):
-            print(name)
-    elif args.command == "check":
-        if args.application and not args.stage:
-            raise ValueError("--application requires --stage")
-        errors, warnings = check(args.stage, args.application, root)
-        for message in warnings:
-            print(f"WARNING {message}")
-        for message in errors:
-            print(f"ERROR {message}")
-        if errors:
-            raise ValueError(f"Secrets check found {len(errors)} error(s)")
-        print(f"Secrets check passed with {len(warnings)} warning(s)")
-    elif args.command == "verify":
-        if not args.secrets_key:
-            raise ValueError(f"Supply --secrets-key or {KEY_ENV}")
-        if args.compare and not args.name:
-            raise ValueError("--compare requires --name")
-        # Decrypting every value also proves the whole file is consistent.
-        values = decrypt_all(args.stage, args.application, args.secrets_key, root)
-        if args.name and args.name not in values:
-            raise ValueError(f"{args.name} is not set")
-        # Never print values: this output can end up in terminals and CI logs.
-        if args.compare:
-            compare_value(args.name, values[args.name])
-            print(f"{args.name}: matches the expected value")
-            return
-        for name in [args.name] if args.name else sorted(values):
-            print(f"{name}: decrypted")
-        print(
-            f"{len(values)} secret(s) decrypted successfully for {args.stage}/{args.application}"
-        )
+    COMMANDS[args.command](args, root)

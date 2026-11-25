@@ -1,5 +1,6 @@
 """Tests for encrypted secret stores, the secrets CLI and their use during deployment."""
 
+import argparse
 import io
 import json
 import os
@@ -284,6 +285,15 @@ class CheckAndVerifyTests(TemporaryStoreTestCase):
         with redirect_stdout(io.StringIO()) as output:
             secrets.run(list(argv), self.root)
         return output.getvalue()
+
+    def test_every_cli_subcommand_has_a_handler(self):
+        """Keep the command table in step with the argument parser."""
+        subcommands = next(
+            action
+            for action in secrets.parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        self.assertEqual(set(subcommands.choices), set(secrets.COMMANDS))
 
     def test_cli_keygen_and_rekey_say_what_to_commit(self):
         """Tell the operator which files to commit after keygen and rekey."""
